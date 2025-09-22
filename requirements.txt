@@ -1,0 +1,42 @@
+# [file name]: requirements.txt (更新)
+# [file content begin]
+# 核心AI框架
+langchain>=0.1.0
+langchain-community>=0.0.20
+
+# Web框架
+fastapi>=0.104.0
+uvicorn>=0.24.0
+jinja2>=3.0.0
+python-multipart>=0.0.6
+
+# 代码分析工具
+pylint>=3.0.0
+mypy>=1.0.0
+bandit>=1.7.0
+gitpython>=3.1.0
+
+# 测试框架
+pytest>=7.0.0
+
+# 环境管理
+python-dotenv>=1.0.0
+
+# HTTP请求
+requests>=2.31.0
+aiohttp>=3.9.0
+
+# 大模型SDK
+openai>=1.0.0
+dashscope>=1.14.0
+
+# 数据库
+sqlalchemy>=2.0.0
+alembic>=1.12.0
+
+# 缓存
+redis>=5.0.0
+
+# 其他工具
+nodejs>=18.0.0  # 需要通过其他方式安装
+# [file content end]
