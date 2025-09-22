@@ -1,0 +1,6 @@
+.env
+.env.local
+config.local.json
+*.key
+*.pem
+secrets/
