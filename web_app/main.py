@@ -12,7 +12,8 @@ import os
 from datetime import datetime
 from typing import Dict, List, Optional
 import logging
-
+from pydantic import BaseModel
+from fastapi import Body
 from src.agents.coordinator_agent import CoordinatorAgent
 from src.agents.analysis_agent import AnalysisAgent
 from src.agents.detection_agent import DetectionAgent
@@ -48,6 +49,72 @@ class ConnectionManager:
                 logger.error(f"广播消息失败: {e}")
 
 class WebInterface:
+
+    def add_report_route(self):
+        @self.app.get("/api/tasks/{task_id}/report")
+        async def download_report(task_id: str):
+            """生成并下载检测报告（Markdown）"""
+            if task_id not in self.tasks:
+                raise HTTPException(status_code=404, detail="任务不存在")
+            task = self.tasks[task_id]
+            report_md = self._generate_report_markdown(task)
+            filename = f"report_{task_id}.md"
+            from fastapi.responses import Response
+            headers = {
+                'Content-Disposition': f'attachment; filename="{filename}"'
+            }
+            return Response(content=report_md, media_type="text/markdown", headers=headers)
+
+    def _generate_report_markdown(self, task) -> str:
+        """生成检测报告Markdown内容"""
+        lines = []
+        lines.append(f"# 代码缺陷检测报告\n")
+        lines.append(f"**任务ID**: {task.get('id','')}  ")
+        lines.append(f"**代码库路径**: {task.get('repo_path','')}  ")
+        lines.append(f"**首选模型**: {task.get('preferred_model','')}  ")
+        lines.append(f"**创建时间**: {task.get('created_at','')}  ")
+        lines.append(f"**完成时间**: {task.get('completed_at','')}  ")
+        lines.append(f"**状态**: {task.get('status','')}  ")
+        lines.append("\n---\n")
+        # 汇总
+        results = task.get('results', {})
+        lines.append(f"## 汇总信息\n")
+        lines.append(f"**总结**: {results.get('summary','无')}  ")
+        lines.append(f"**模型选择**: {results.get('model_selected','无')}  ")
+        lines.append(f"**子任务数**: {len(results.get('subtask_results',{}))}  ")
+        lines.append(f"**所有问题数**: {results.get('defects_found','-')}  ")
+        lines.append("\n---\n")
+        # 各Agent详细结果
+        subtask_results = results.get('subtask_results', {})
+        for agent, agent_result in subtask_results.items():
+            lines.append(f"## {agent} 结果\n")
+            summary = agent_result.get('summary','无')
+            lines.append(f"**总结**: {summary}  ")
+            # 结构化内容
+            for k, v in agent_result.items():
+                if k == 'summary':
+                    continue
+                if isinstance(v, (str, int, float)):
+                    lines.append(f"- **{k}**: {v}")
+                elif isinstance(v, list):
+                    lines.append(f"- **{k}**:")
+                    for item in v:
+                        lines.append(f"    - {item}")
+                elif isinstance(v, dict):
+                    lines.append(f"- **{k}**:")
+                    for subk, subv in v.items():
+                        lines.append(f"    - {subk}: {subv}")
+            # 修复建议/代码块特殊处理
+            if 'fix_suggestion' in agent_result:
+                lines.append(f"\n**修复建议代码：**\n")
+                lines.append(f"```python\n{agent_result['fix_suggestion']}\n```")
+            lines.append("\n---\n")
+        # 错误信息
+        if task.get('error'):
+            lines.append(f"## 错误信息\n{task['error']}\n")
+        # 日志（可选）
+        # lines.append("## 日志\n...\n")
+        return '\n'.join(lines)
     def __init__(self):
         self.app = FastAPI(
             title="多Agent缺陷检测系统",
@@ -55,13 +122,12 @@ class WebInterface:
             version="1.0.0"
         )
         self.manager = ConnectionManager()
-        self.tasks: Dict[str, Dict] = {}  # 存储任务状态
+        self.tasks = {}  # 存储任务状态
         self.system = None
-        
         # 设置模板和静态文件
         self.templates = Jinja2Templates(directory="web_app/templates")
-        
         self._setup_routes()
+        self.add_report_route()
         self._initialize_system()
 
     def _initialize_system(self):
@@ -103,6 +169,10 @@ class WebInterface:
         @self.app.get("/dashboard")
         async def dashboard(request: Request):
             return self.templates.TemplateResponse("dashboard.html", {"request": request})
+
+        @self.app.get("/tasks/{task_id}", response_class=HTMLResponse)
+        async def task_detail_page(request: Request, task_id: str):
+            return self.templates.TemplateResponse("task_detail.html", {"request": request})
         
         @self.app.get("/api/system/status")
         async def get_system_status():
@@ -115,10 +185,16 @@ class WebInterface:
                 "total_tasks": len(self.tasks)
             }
             return status
-        
+
+        class AnalysisTaskRequest(BaseModel):
+            repo_path: str
+            preferred_model: Optional[str] = "deepseek"
+
         @self.app.post("/api/tasks/analyze")
-        async def create_analysis_task(repo_path: str, preferred_model: Optional[str] = "deepseek"):
+        async def create_analysis_task(request: AnalysisTaskRequest = Body(...)):
             """创建代码分析任务"""
+            repo_path = request.repo_path
+            preferred_model = request.preferred_model
             task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             
             if not os.path.exists(repo_path):

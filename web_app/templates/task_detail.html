@@ -23,9 +23,14 @@
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5 id="taskTitle">任务详情</h5>
-                        <a href="/" class="btn btn-secondary btn-sm">
-                            <i class="fas fa-arrow-left me-1"></i>返回
-                        </a>
+                        <div>
+                            <button id="downloadReportBtn" class="btn btn-success btn-sm me-2" style="display:none;">
+                                <i class="fas fa-download me-1"></i>下载报告
+                            </button>
+                            <a href="/" class="btn btn-secondary btn-sm">
+                                <i class="fas fa-arrow-left me-1"></i>返回
+                            </a>
+                        </div>
                     </div>
                     <div class="card-body">
                         <div id="taskContent">
@@ -53,6 +58,14 @@
                     const response = await fetch(`/api/tasks/${this.taskId}`);
                     const task = await response.json();
                     this.renderTaskDetail(task);
+                    // 仅在任务已完成时显示下载按钮
+                    const btn = document.getElementById('downloadReportBtn');
+                    if (task.status === 'completed') {
+                        btn.style.display = '';
+                        btn.onclick = () => this.downloadReport();
+                    } else {
+                        btn.style.display = 'none';
+                    }
                 } catch (error) {
                     console.error('加载任务详情失败:', error);
                     document.getElementById('taskContent').innerHTML = `
@@ -61,6 +74,24 @@
                             加载任务详情失败: ${error.message}
                         </div>
                     `;
+                }
+            }
+
+            async downloadReport() {
+                try {
+                    const resp = await fetch(`/api/tasks/${this.taskId}/report`);
+                    if (!resp.ok) throw new Error('报告下载失败');
+                    const blob = await resp.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `report_${this.taskId}.md`;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    window.URL.revokeObjectURL(url);
+                } catch (e) {
+                    alert('报告下载失败: ' + e.message);
                 }
             }
 

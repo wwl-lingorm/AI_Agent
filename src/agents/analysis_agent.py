@@ -25,14 +25,10 @@ class AnalysisAgent(BaseAgent):
         }
     
     def _analyze_code_structure(self, repo_path: str) -> Dict[str, Any]:
-        """分析代码结构"""
+        """分析代码结构，输出详细结构信息"""
         result = {
-            "files": [],
-            "imports": [],
-            "functions": [],
-            "classes": []
+            "files": []
         }
-        
         for root, dirs, files in os.walk(repo_path):
             for file in files:
                 if file.endswith('.py'):
@@ -40,38 +36,51 @@ class AnalysisAgent(BaseAgent):
                     try:
                         with open(file_path, 'r', encoding='utf-8') as f:
                             content = f.read()
-                        
-                        # 使用AST分析Python代码
                         tree = ast.parse(content)
-                        file_info = self._analyze_python_file(tree, file_path)
+                        file_info = self._analyze_python_file(tree, file_path, content)
                         result["files"].append(file_info)
-                        
                     except Exception as e:
                         self.log(f"分析文件 {file_path} 时出错: {str(e)}", "error")
-        
         return result
     
-    def _analyze_python_file(self, tree, file_path: str) -> Dict[str, Any]:
-        """分析单个Python文件"""
+    def _analyze_python_file(self, tree, file_path: str, content: str) -> Dict[str, Any]:
+        """分析单个Python文件，输出函数、类、导入、全局变量、注释、文档字符串等，并包含原始内容"""
         file_info = {
             "path": file_path,
             "functions": [],
             "classes": [],
-            "imports": []
+            "imports": [],
+            "globals": [],
+            "docstring": ast.get_docstring(tree),
+            "comments": [],
+            "content": content
         }
-        
+        # AST结构分析
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
-                file_info["functions"].append({
+                func_info = {
                     "name": node.name,
-                    "lineno": node.lineno
-                })
+                    "lineno": node.lineno,
+                    "args": [a.arg for a in node.args.args],
+                    "docstring": ast.get_docstring(node)
+                }
+                file_info["functions"].append(func_info)
             elif isinstance(node, ast.ClassDef):
-                file_info["classes"].append({
-                    "name": node.name, 
-                    "lineno": node.lineno
-                })
+                class_info = {
+                    "name": node.name,
+                    "lineno": node.lineno,
+                    "docstring": ast.get_docstring(node),
+                    "methods": [n.name for n in node.body if isinstance(n, ast.FunctionDef)]
+                }
+                file_info["classes"].append(class_info)
             elif isinstance(node, (ast.Import, ast.ImportFrom)):
                 file_info["imports"].append(ast.unparse(node))
-        
+            elif isinstance(node, ast.Assign):
+                # 全局变量
+                if isinstance(getattr(node, 'parent', None), ast.Module):
+                    for t in node.targets:
+                        if isinstance(t, ast.Name):
+                            file_info["globals"].append({"name": t.id, "lineno": node.lineno})
+        # 注释提取（简单实现：以#开头的行）
+        file_info["comments"] = [line.strip() for line in content.splitlines() if line.strip().startswith('#')]
         return file_info

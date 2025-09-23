@@ -12,25 +12,52 @@ class ValidationAgent(BaseAgent):
     
     async def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
         self.log("开始验证修复结果")
-        
         repo_path = task.get("repo_path")
+        # 批量验证模式：支持传入修复结果列表
+        repair_results = task.get("repair_results")
+        code_context_map = task.get("code_context_map")  # {file_path: 最新代码内容}
+        validation_report = []
+        if repair_results and code_context_map:
+            for repair in repair_results:
+                issue = repair.get("original_issue")
+                file_path = issue.get("file") if issue else None
+                fixed_code = repair.get("fix_suggestion")
+                original_issue = issue.get("message") if issue else None
+                if not repo_path or not fixed_code or not file_path:
+                    validation_report.append({"status": "error", "error": "缺少必要信息", "repair": repair})
+                    continue
+                validation_results = {
+                    "syntax_check": await self._check_syntax(fixed_code, file_path),
+                    "test_execution": await self._run_tests(repo_path, file_path, fixed_code),
+                    "regression_check": await self._check_regression(original_issue, fixed_code),
+                    "code_quality": await self._check_code_quality(fixed_code, file_path)
+                }
+                overall_passed = all(result.get("passed", False) for result in validation_results.values())
+                validation_report.append({
+                    "file": file_path,
+                    "original_issue": original_issue,
+                    "validation_passed": overall_passed,
+                    "detailed_results": validation_results,
+                    "summary": f"验证结果: {'通过' if overall_passed else '未通过'}"
+                })
+            return {
+                "status": "completed",
+                "validation_report": validation_report,
+                "summary": f"共验证{len(validation_report)}个修复结果"
+            }
+        # 单个修复验证兼容
         fixed_code = task.get("fixed_code")
         original_issue = task.get("original_issue")
         file_path = task.get("file_path")
-        
         if not repo_path or not fixed_code:
             return {"status": "error", "error": "缺少代码库路径或修复后的代码"}
-        
         validation_results = {
             "syntax_check": await self._check_syntax(fixed_code, file_path),
             "test_execution": await self._run_tests(repo_path, file_path, fixed_code),
             "regression_check": await self._check_regression(original_issue, fixed_code),
             "code_quality": await self._check_code_quality(fixed_code, file_path)
         }
-        
-        # 综合评估
         overall_passed = all(result.get("passed", False) for result in validation_results.values())
-        
         return {
             "status": "completed",
             "validation_passed": overall_passed,

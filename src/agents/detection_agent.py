@@ -17,33 +17,31 @@ class DetectionAgent(BaseAgent):
     
     async def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
         self.log("开始缺陷检测")
-        
         repo_path = task.get("repo_path")
         if not repo_path:
             return {"status": "error", "error": "代码库路径无效"}
-        
         # 检测项目语言
         project_language = self._detect_project_language(repo_path)
         self.log(f"检测到项目语言: {project_language}")
-        
         # 运行对应的分析工具
         analysis_results = {}
+        all_issues = []
         available_tools = self.tool_config.get(project_language, [])
-        
         for tool in available_tools:
             if self._is_tool_available(tool):
                 result = await self._run_analysis_tool(tool, repo_path, project_language)
                 analysis_results[tool] = result
+                # 只收集标准化结构的issues
+                if result.get("available", True) and "issues" in result:
+                    all_issues.extend(result["issues"])
             else:
                 self.log(f"工具 {tool} 不可用", "warning")
-                analysis_results[tool] = {"available": False, "error": "工具未安装"}
-        
-        # 汇总结果
-        all_issues = []
-        for tool, result in analysis_results.items():
-            if result.get("available", True) and "issues" in result:
-                all_issues.extend(result["issues"])
-        
+                analysis_results[tool] = {"available": False, "error": "工具未安装", "issues": []}
+        # 汇总结构化输出
+        summary = {
+            "total_issues": len(all_issues),
+            "by_tool": {tool: len(analysis_results.get(tool, {}).get("issues", [])) for tool in available_tools}
+        }
         return {
             "status": "completed",
             "defects_found": len(all_issues),
@@ -51,7 +49,7 @@ class DetectionAgent(BaseAgent):
             "tools_used": list(analysis_results.keys()),
             "analysis_results": analysis_results,
             "all_issues": all_issues,
-            "summary": f"使用 {len(analysis_results)} 个工具发现 {len(all_issues)} 个问题"
+            "summary": summary
         }
     
     def _detect_project_language(self, repo_path: str) -> str:
@@ -108,14 +106,23 @@ class DetectionAgent(BaseAgent):
             return {"available": True, "issues": [], "error": f"工具执行错误: {str(e)}"}
     
     async def _run_pylint(self, repo_path: str) -> Dict[str, Any]:
-        """运行Pylint"""
+        """运行Pylint，输出标准化问题结构"""
         try:
             result = subprocess.run([
                 'pylint', '--output-format=json', repo_path
             ], capture_output=True, text=True, cwd=repo_path, timeout=60)
-            
-            if result.returncode in [0, 4, 8, 16, 32]:  # Pylint的各种退出码
-                issues = json.loads(result.stdout) if result.stdout else []
+            issues = []
+            if result.returncode in [0, 4, 8, 16, 32]:
+                raw = json.loads(result.stdout) if result.stdout else []
+                for item in raw:
+                    issues.append({
+                        "file": item.get("path"),
+                        "line": item.get("line"),
+                        "type": item.get("type"),
+                        "symbol": item.get("symbol"),
+                        "message": item.get("message"),
+                        "tool": "pylint"
+                    })
                 return {
                     "available": True,
                     "issues": issues,
@@ -128,22 +135,33 @@ class DetectionAgent(BaseAgent):
             return {"available": True, "issues": [], "error": "执行超时"}
     
     async def _run_mypy(self, repo_path: str) -> Dict[str, Any]:
-        """运行MyPy类型检查"""
+        """运行MyPy类型检查，输出标准化问题结构"""
         try:
             result = subprocess.run([
                 'mypy', repo_path, '--ignore-missing-imports', '--no-error-summary'
             ], capture_output=True, text=True, cwd=repo_path, timeout=60)
-            
             issues = []
             if result.returncode != 0:
                 for line in result.stdout.split('\n'):
                     if line.strip() and 'error:' in line:
-                        issues.append({
-                            "type": "type_error",
-                            "message": line.strip(),
-                            "tool": "mypy"
-                        })
-            
+                        # 解析格式: file:line: error: ...
+                        parts = line.split(':', 3)
+                        if len(parts) >= 4:
+                            issues.append({
+                                "file": parts[0].strip(),
+                                "line": int(parts[1]),
+                                "type": "type_error",
+                                "message": parts[3].strip(),
+                                "tool": "mypy"
+                            })
+                        else:
+                            issues.append({
+                                "file": None,
+                                "line": None,
+                                "type": "type_error",
+                                "message": line.strip(),
+                                "tool": "mypy"
+                            })
             return {
                 "available": True,
                 "issues": issues,
@@ -202,18 +220,28 @@ class DetectionAgent(BaseAgent):
             return {"available": False, "issues": [], "error": "ESLint未安装"}
     
     async def _run_bandit(self, repo_path: str) -> Dict[str, Any]:
-        """运行Bandit安全扫描"""
+        """运行Bandit安全扫描，输出标准化问题结构"""
         try:
             result = subprocess.run([
                 'bandit', '-r', '-f', 'json', repo_path
             ], capture_output=True, text=True, cwd=repo_path, timeout=60)
-            
-            if result.returncode in [0, 1]:  # Bandit的退出码
+            issues = []
+            if result.returncode in [0, 1]:
                 try:
-                    issues = json.loads(result.stdout) if result.stdout else []
+                    bandit_json = json.loads(result.stdout) if result.stdout else {}
+                    for item in bandit_json.get("results", []):
+                        issues.append({
+                            "file": item.get("filename"),
+                            "line": item.get("line_number"),
+                            "type": item.get("test_id"),
+                            "message": item.get("issue_text"),
+                            "severity": item.get("issue_severity"),
+                            "confidence": item.get("issue_confidence"),
+                            "tool": "bandit"
+                        })
                     return {
                         "available": True,
-                        "issues": issues.get("results", []),
+                        "issues": issues,
                         "stdout": result.stdout,
                         "stderr": result.stderr
                     }

@@ -198,9 +198,12 @@ class Dashboard {
             const response = await fetch('/api/tasks/analyze', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Content-Type': 'application/json',
                 },
-                body: `repo_path=${encodeURIComponent(repoPath)}&preferred_model=${model}`
+                body: JSON.stringify({
+                    repo_path: repoPath,
+                    preferred_model: model
+                })
             });
 
             const result = await response.json();
@@ -210,7 +213,8 @@ class Dashboard {
                 this.showProgressModal();
                 this.loadTasks(); // 刷新任务列表
             } else {
-                alert('创建任务失败: ' + result.detail);
+                console.log('创建任务失败返回内容:', result);
+                alert('创建任务失败: ' + JSON.stringify(result));
             }
         } catch (error) {
             console.error('分析请求失败:', error);

@@ -15,29 +15,60 @@ class CoordinatorAgent(BaseAgent):
         self.log(f"注册Agent: {name}")
     
     async def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        """执行协调任务"""
+        """执行协调任务（全流程自动化）"""
         self.log(f"开始处理任务: {task.get('description', '未知任务')}")
-        
         # 智能选择模型
         task_type = self._determine_task_type(task)
         best_model = self.model_selector.select_best_model(task_type)
         task['preferred_model'] = best_model.value
-        
-        # 任务分解逻辑
-        sub_tasks = self._decompose_task(task)
+
         results = {}
-        
-        # 并行执行子任务
-        for sub_task in sub_tasks:
-            agent_name = sub_task['assigned_agent']
-            if agent_name in self.agents:
-                try:
-                    result = await self.agents[agent_name].execute(sub_task)
-                    results[agent_name] = result
-                except Exception as e:
-                    self.log(f"Agent {agent_name} 执行失败: {str(e)}", "error")
-                    results[agent_name] = {"status": "error", "error": str(e)}
-        
+        # 1. 代码结构分析
+        analysis_task = {
+            "type": "analysis",
+            "assigned_agent": "AnalysisAgent",
+            "repo_path": task.get("repo_path"),
+            "target_files": task.get("target_files")
+        }
+        analysis_result = await self.agents["AnalysisAgent"].execute(analysis_task)
+        results["AnalysisAgent"] = analysis_result
+
+        # 2. 静态检测
+        detection_task = {
+            "type": "detection",
+            "assigned_agent": "DetectionAgent",
+            "repo_path": task.get("repo_path")
+        }
+        detection_result = await self.agents["DetectionAgent"].execute(detection_task)
+        results["DetectionAgent"] = detection_result
+
+        # 3. 自动修复（批量）
+        # 构建 code_context_map: {file_path: code_str}
+        code_context_map = {}
+        for file_info in analysis_result.get("structure", {}).get("files", []):
+            code_context_map[file_info["path"]] = file_info.get("content") if "content" in file_info else ""
+        repair_task = {
+            "type": "repair",
+            "assigned_agent": "RepairAgent",
+            "repo_path": task.get("repo_path"),
+            "preferred_model": best_model.value,
+            "all_issues": detection_result.get("all_issues", []),
+            "code_context_map": code_context_map
+        }
+        repair_result = await self.agents["RepairAgent"].execute(repair_task)
+        results["RepairAgent"] = repair_result
+
+        # 4. 自动验证（批量）
+        validation_task = {
+            "type": "validation",
+            "assigned_agent": "ValidationAgent",
+            "repo_path": task.get("repo_path"),
+            "repair_results": repair_result.get("repair_results"),
+            "code_context_map": code_context_map
+        }
+        validation_result = await self.agents["ValidationAgent"].execute(validation_task)
+        results["ValidationAgent"] = validation_result
+
         # 汇总结果
         final_result = self._aggregate_results(results)
         final_result['model_selected'] = best_model.value
