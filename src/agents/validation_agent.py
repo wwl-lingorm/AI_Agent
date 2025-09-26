@@ -17,7 +17,15 @@ class ValidationAgent(BaseAgent):
         repair_results = task.get("repair_results")
         code_context_map = task.get("code_context_map")  # {file_path: 最新代码内容}
         validation_report = []
-        if repair_results and code_context_map:
+        if repair_results is not None and code_context_map:
+            if not repair_results:
+                # 没有修复结果需要验证
+                return {
+                    "status": "completed",
+                    "validation_report": [],
+                    "summary": "无需验证（未发现问题或修复失败）"
+                }
+                
             for repair in repair_results:
                 issue = repair.get("original_issue")
                 file_path = issue.get("file") if issue else None

@@ -63,8 +63,18 @@ class DeepSeekAdapter(BaseLLMAdapter):
             result = response.json()
             return result["choices"][0]["message"]["content"]
         except Exception as e:
-            self.logger.error(f"DeepSeek API调用失败: {str(e)}")
-            return f"DeepSeek错误: {str(e)}"
+            # 打印原始响应内容
+            import sys
+            exc_type, exc_value, exc_tb = sys.exc_info()
+            response_text = None
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    response_text = e.response.text
+                    print("DeepSeek原始响应：", response_text)
+                except Exception:
+                    pass
+            self.logger.error(f"DeepSeek API调用失败: {str(e)}; 原始响应: {response_text}")
+            return f"DeepSeek错误: {str(e)}; 原始响应: {response_text}"
     
     async def chat_complete(self, messages: List[Dict], **kwargs) -> str:
         # 与generate_code类似，可以根据需要调整
@@ -213,13 +223,24 @@ class MultiLLMService:
                     self.logger.info(f"尝试使用 {provider.value} 生成代码")
                     result = await self.adapters[provider].generate_code(prompt, **kwargs)
                     
-                    if not result.startswith(f"{provider.value}错误"):
+                    # 检查是否是错误消息
+                    is_error = (
+                        result.startswith("DeepSeek错误") or 
+                        result.startswith("OpenAI错误") or 
+                        result.startswith("通义灵码错误") or
+                        "错误:" in result[:50]  # 前50个字符中包含错误信息
+                    )
+                    
+                    if not is_error:
                         return {
                             "success": True,
                             "content": result,
                             "provider": provider.value,
                             "cost_estimate": 0.0  # 简化实现
                         }
+                    else:
+                        self.logger.warning(f"{provider.value} 返回错误: {result}")
+                        continue
                     
                 except Exception as e:
                     self.logger.warning(f"{provider.value} 生成失败: {str(e)}")
@@ -241,12 +262,23 @@ class MultiLLMService:
                     self.logger.info(f"尝试使用 {provider.value} 进行聊天补全")
                     result = await self.adapters[provider].chat_complete(messages, **kwargs)
                     
-                    if not result.startswith(f"{provider.value}错误"):
+                    # 检查是否是错误消息
+                    is_error = (
+                        result.startswith("DeepSeek错误") or 
+                        result.startswith("OpenAI错误") or 
+                        result.startswith("通义灵码错误") or
+                        "错误:" in result[:50]  # 前50个字符中包含错误信息
+                    )
+                    
+                    if not is_error:
                         return {
                             "success": True,
                             "content": result,
                             "provider": provider.value
                         }
+                    else:
+                        self.logger.warning(f"{provider.value} 返回错误: {result}")
+                        continue
                     
                 except Exception as e:
                     self.logger.warning(f"{provider.value} 聊天失败: {str(e)}")

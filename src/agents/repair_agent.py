@@ -20,21 +20,60 @@ class RepairAgent(BaseAgent):
         # 支持批量修复 DetectionAgent 的 all_issues
         all_issues = task.get("all_issues")
         code_context_map = task.get("code_context_map")  # {file_path: code_str}
-        if all_issues and code_context_map:
+        
+        self.log(f"收到修复任务 - all_issues数量: {len(all_issues) if all_issues else 0}")
+        self.log(f"收到修复任务 - code_context_map keys: {list(code_context_map.keys()) if code_context_map else []}")
+        
+        # 调试信息
+        if all_issues and len(all_issues) > 0:
+            self.log(f"第一个问题示例: {all_issues[0]}")
+        if code_context_map and len(code_context_map) > 0:
+            first_key = list(code_context_map.keys())[0]
+            content_length = len(code_context_map[first_key])
+            self.log(f"第一个文件内容长度: {content_length}")
+        if all_issues is not None and code_context_map:
+            if not all_issues:
+                # 没有发现问题
+                return {
+                    "status": "completed",
+                    "repair_results": [],
+                    "summary": "未发现需要修复的问题"
+                }
+            
             results = []
-            for issue in all_issues:
+            import os
+            import asyncio
+            for i, issue in enumerate(all_issues):
                 file_path = issue.get("file")
                 code_context = code_context_map.get(file_path)
+                self.log(f"处理问题 {i+1}/{len(all_issues)}: {file_path}:{issue.get('line')} - {issue.get('message')}")
+                # 新增：尝试用basename匹配
                 if not code_context:
+                    for k in code_context_map:
+                        if os.path.basename(k) == os.path.basename(file_path):
+                            code_context = code_context_map[k]
+                            self.log(f"通过basename匹配找到上下文: {k}")
+                            break
+                if not code_context:
+                    self.log(f"错误: 未找到{file_path}的代码上下文，已知keys: {list(code_context_map.keys())}")
                     results.append({"status": "error", "error": f"未找到{file_path}的代码上下文", "original_issue": issue})
                     continue
+                self.log(f"找到代码上下文，长度: {len(code_context)} 字符")
                 prompt = self._build_repair_prompt(self._format_issue(issue), code_context)
-                llm_result = await self.llm_service.generate_with_fallback(
-                    prompt,
-                    preferred_provider=preferred_provider,
-                    max_tokens=2048,
-                    temperature=0.3
-                )
+                self.log(f"生成提示词，长度: {len(prompt)} 字符")
+                try:
+                    llm_result = await self.llm_service.generate_with_fallback(
+                        prompt,
+                        preferred_provider=preferred_provider,
+                        max_tokens=2048,
+                        temperature=0.3
+                    )
+                    self.log(f"LLM调用结果: success={llm_result.get('success')}, error={llm_result.get('error')}, content预览={str(llm_result.get('content'))[:200]}")
+                except Exception as e:
+                    self.log(f"LLM调用异常: {str(e)}")
+                    llm_result = {"success": False, "error": f"LLM调用异常: {str(e)}"}
+                # 新增：每次调用后延迟，避免QPS限制
+                await asyncio.sleep(1)
                 if llm_result["success"]:
                     results.append({
                         "status": "completed",

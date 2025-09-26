@@ -20,8 +20,11 @@ class DetectionAgent(BaseAgent):
         repo_path = task.get("repo_path")
         if not repo_path:
             return {"status": "error", "error": "代码库路径无效"}
-        # 检测项目语言
-        project_language = self._detect_project_language(repo_path)
+        # 支持单文件检测
+        if os.path.isfile(repo_path) and repo_path.endswith('.py'):
+            project_language = 'python'
+        else:
+            project_language = self._detect_project_language(repo_path)
         self.log(f"检测到项目语言: {project_language}")
         # 运行对应的分析工具
         analysis_results = {}
@@ -29,18 +32,20 @@ class DetectionAgent(BaseAgent):
         available_tools = self.tool_config.get(project_language, [])
         for tool in available_tools:
             if self._is_tool_available(tool):
-                result = await self._run_analysis_tool(tool, repo_path, project_language)
+                # 单文件分析时，pylint/mypy/bandit直接传文件路径
+                target_path = repo_path if os.path.isfile(repo_path) and repo_path.endswith('.py') else repo_path
+                result = await self._run_analysis_tool(tool, target_path, project_language)
                 analysis_results[tool] = result
-                # 只收集标准化结构的issues
                 if result.get("available", True) and "issues" in result:
                     all_issues.extend(result["issues"])
             else:
                 self.log(f"工具 {tool} 不可用", "warning")
                 analysis_results[tool] = {"available": False, "error": "工具未安装", "issues": []}
+        
         # 汇总结构化输出
         summary = {
             "total_issues": len(all_issues),
-            "by_tool": {tool: len(analysis_results.get(tool, {}).get("issues", [])) for tool in available_tools}
+            "by_tool": {tool: len(analysis_results.get(tool, {}).get("issues", [])) for tool in list(analysis_results.keys())}
         }
         return {
             "status": "completed",
@@ -82,10 +87,25 @@ class DetectionAgent(BaseAgent):
     def _is_tool_available(self, tool: str) -> bool:
         """检查工具是否可用"""
         try:
-            subprocess.run([tool, '--version'], capture_output=True, check=True)
+            # 使用 python -m 方式运行工具，确保使用正确的环境
+            import sys
+            python_executable = sys.executable
+            self.log(f"检查工具 {tool} 是否可用，使用Python: {python_executable}")
+            
+            result = subprocess.run([python_executable, '-m', tool, '--version'], 
+                         capture_output=True, check=True, timeout=10)
+            self.log(f"工具 {tool} 可用: {result.stdout.decode().strip()}")
             return True
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            return False
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+            self.log(f"使用 -m 方式检查工具 {tool} 失败: {str(e)}")
+            # 如果 -m 方式失败，尝试直接调用
+            try:
+                result = subprocess.run([tool, '--version'], capture_output=True, check=True, timeout=10)
+                self.log(f"工具 {tool} 直接调用可用: {result.stdout.decode().strip()}")
+                return True
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e2:
+                self.log(f"直接调用工具 {tool} 也失败: {str(e2)}")
+                return False
     
     async def _run_analysis_tool(self, tool: str, repo_path: str, language: str) -> Dict[str, Any]:
         """运行指定的分析工具"""
@@ -108,38 +128,56 @@ class DetectionAgent(BaseAgent):
     async def _run_pylint(self, repo_path: str) -> Dict[str, Any]:
         """运行Pylint，输出标准化问题结构"""
         try:
+            import sys
+            python_executable = sys.executable
             result = subprocess.run([
-                'pylint', '--output-format=json', repo_path
-            ], capture_output=True, text=True, cwd=repo_path, timeout=60)
+                python_executable, '-m', 'pylint', '--output-format=json', repo_path
+            ], capture_output=True, text=True, timeout=60)
             issues = []
-            if result.returncode in [0, 4, 8, 16, 32]:
-                raw = json.loads(result.stdout) if result.stdout else []
-                for item in raw:
-                    issues.append({
-                        "file": item.get("path"),
-                        "line": item.get("line"),
-                        "type": item.get("type"),
-                        "symbol": item.get("symbol"),
-                        "message": item.get("message"),
-                        "tool": "pylint"
-                    })
+            # pylint返回码说明:
+            # 0: 无问题
+            # 1: fatal message issued (致命错误)
+            # 2: error message issued (错误)
+            # 4: warning message issued (警告)  
+            # 8: refactor message issued (重构建议)
+            # 16: convention message issued (约定)
+            # 32: usage error (使用错误)
+            # 可以组合，比如 1+2+4 = 7 表示有fatal、error、warning
+            if result.returncode < 32 or result.returncode == 32:  # 接受所有正常的pylint返回码
+                try:
+                    raw = json.loads(result.stdout) if result.stdout else []
+                    for item in raw:
+                        issues.append({
+                            "file": item.get("path"),
+                            "line": item.get("line"),
+                            "type": item.get("type"),
+                            "symbol": item.get("symbol"),
+                            "message": item.get("message"),
+                            "tool": "pylint"
+                        })
+                except json.JSONDecodeError as e:
+                    return {"available": True, "issues": [], "error": f"JSON解析失败: {str(e)}"}
+                
                 return {
                     "available": True,
                     "issues": issues,
                     "stdout": result.stdout,
-                    "stderr": result.stderr
+                    "stderr": result.stderr,
+                    "returncode": result.returncode
                 }
             else:
-                return {"available": True, "issues": [], "error": result.stderr}
+                return {"available": True, "issues": [], "error": f"Pylint执行失败 (返回码: {result.returncode}): {result.stderr}"}
         except subprocess.TimeoutExpired:
             return {"available": True, "issues": [], "error": "执行超时"}
     
     async def _run_mypy(self, repo_path: str) -> Dict[str, Any]:
         """运行MyPy类型检查，输出标准化问题结构"""
         try:
+            import sys
+            python_executable = sys.executable
             result = subprocess.run([
-                'mypy', repo_path, '--ignore-missing-imports', '--no-error-summary'
-            ], capture_output=True, text=True, cwd=repo_path, timeout=60)
+                python_executable, '-m', 'mypy', repo_path, '--ignore-missing-imports', '--no-error-summary'
+            ], capture_output=True, text=True, timeout=60)
             issues = []
             if result.returncode != 0:
                 for line in result.stdout.split('\n'):
@@ -222,9 +260,17 @@ class DetectionAgent(BaseAgent):
     async def _run_bandit(self, repo_path: str) -> Dict[str, Any]:
         """运行Bandit安全扫描，输出标准化问题结构"""
         try:
-            result = subprocess.run([
-                'bandit', '-r', '-f', 'json', repo_path
-            ], capture_output=True, text=True, cwd=repo_path, timeout=60)
+            import sys
+            python_executable = sys.executable
+            # 如果是单文件，直接扫描文件；如果是目录，递归扫描
+            if os.path.isfile(repo_path):
+                result = subprocess.run([
+                    python_executable, '-m', 'bandit', '-f', 'json', repo_path
+                ], capture_output=True, text=True, timeout=60)
+            else:
+                result = subprocess.run([
+                    python_executable, '-m', 'bandit', '-r', '-f', 'json', repo_path
+                ], capture_output=True, text=True, timeout=60)
             issues = []
             if result.returncode in [0, 1]:
                 try:

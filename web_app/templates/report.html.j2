@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+  <meta charset="UTF-8">
+  <title>代码检测与修复报告</title>
+  <style>
+    body { font-family: 'Segoe UI', Arial, sans-serif; margin: 2em; background: #f9f9f9; }
+    h1 { color: #2d7ff9; }
+    table { border-collapse: collapse; width: 100%; background: #fff; }
+    th, td { border: 1px solid #e0e0e0; padding: 8px; text-align: center; }
+    th { background: #f0f4fa; }
+    .success { color: #27ae60; font-weight: bold; }
+    .fail { color: #e74c3c; font-weight: bold; }
+    details { margin: 1em 0; }
+    summary { cursor: pointer; font-weight: bold; }
+    .section { margin-bottom: 2em; }
+  </style>
+</head>
+<body>
+  <h1>代码检测与修复报告</h1>
+  <div class="section">
+    <b>检测文件：</b>{{ filename }}<br>
+    <b>检测时间：</b>{{ date }}<br>
+    <b>检测工具：</b>{{ tools|join(', ') }}<br>
+    <b>修复模型：</b>{{ model }}
+  </div>
+  <div class="section">
+    <h2>检测结果概览</h2>
+    <ul>
+      <li>检测问题总数：<b>{{ total_issues }}</b></li>
+      <li>已成功修复：<b class="success">{{ fixed_issues }}</b></li>
+      <li>修复成功率：<b class="success">{{ success_rate }}%</b></li>
+    </ul>
+  </div>
+  <div class="section">
+    <h2>详细问题列表</h2>
+    <table>
+      <tr>
+        <th>序号</th><th>行号</th><th>问题类型</th><th>问题描述</th><th>工具</th><th>修复状态</th>
+      </tr>
+      {% for issue in issues %}
+      <tr>
+        <td>{{ loop.index }}</td><td>{{ issue.line }}</td><td>{{ issue.type }}</td><td>{{ issue.message }}</td><td>{{ issue.tool }}</td><td class="{% if issue.fixed %}success{% else %}fail{% endif %}">{% if issue.fixed %}已修复{% else %}未修复{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  <div class="section">
+    <h2>修复前后代码对比（示例）</h2>
+    <details>
+      <summary>点击展开</summary>
+      <pre><b>修复前：</b>
+{{ code_before }}
+      </pre>
+      <pre><b>修复后：</b>
+{{ code_after }}
+      </pre>
+    </details>
+  </div>
+  <div class="section">
+    <h2>总结</h2>
+    <ul>
+      <li>检测与修复流程全部完成。</li>
+      <li>建议定期运行自动检测，保持代码质量。</li>
+    </ul>
+  </div>
+</body>
+</html>

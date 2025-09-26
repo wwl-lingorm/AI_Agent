@@ -1,0 +1,48 @@
+# 代码检测与修复报告
+
+**检测文件**：`{{ filename }}`  
+**检测时间**：{{ date }}  
+**检测工具**：{{ tools|join(', ') }}  
+**修复模型**：{{ model }}
+
+---
+
+## 检测结果概览
+
+- 检测问题总数：**{{ total_issues }}**
+- 已成功修复：**{{ fixed_issues }}**
+- 修复成功率：**{{ success_rate }}%**
+
+---
+
+## 详细问题列表
+
+| 序号 | 行号 | 问题类型 | 问题描述 | 工具 | 修复状态 |
+|:---:|:----:|:--------:|:--------|:----:|:--------:|
+{% for issue in issues %}| {{ loop.index }} | {{ issue.line }} | {{ issue.type }} | {{ issue.message }} | {{ issue.tool }} | {% if issue.fixed %}✅ 已修复{% else %}❌ 未修复{% endif %} |
+{% endfor %}
+
+---
+
+## 修复前后代码对比（示例）
+
+<details>
+<summary>点击展开</summary>
+
+**修复前：**
+```python
+{{ code_before }}
+```
+
+**修复后：**
+```python
+{{ code_after }}
+```
+</details>
+
+---
+
+## 总结
+
+- 检测与修复流程全部完成。
+- 建议定期运行自动检测，保持代码质量。

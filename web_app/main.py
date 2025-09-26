@@ -3,7 +3,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.requests import Request
 import uvicorn
 import asyncio
@@ -12,6 +12,7 @@ import os
 from datetime import datetime
 from typing import Dict, List, Optional
 import logging
+from .report_generator import ReportGenerator
 from pydantic import BaseModel
 from fastapi import Body
 from src.agents.coordinator_agent import CoordinatorAgent
@@ -51,70 +52,87 @@ class ConnectionManager:
 class WebInterface:
 
     def add_report_route(self):
+        generator = ReportGenerator()
         @self.app.get("/api/tasks/{task_id}/report")
-        async def download_report(task_id: str):
-            """生成并下载检测报告（Markdown）"""
+        async def download_report(task_id: str, fmt: str = "md"):
+            """生成并下载检测报告，支持md/html/pdf"""
             if task_id not in self.tasks:
                 raise HTTPException(status_code=404, detail="任务不存在")
             task = self.tasks[task_id]
-            report_md = self._generate_report_markdown(task)
-            filename = f"report_{task_id}.md"
-            from fastapi.responses import Response
-            headers = {
-                'Content-Disposition': f'attachment; filename="{filename}"'
-            }
-            return Response(content=report_md, media_type="text/markdown", headers=headers)
+            # 构造context
+            context = self._build_report_context(task)
+            if not context or not context.get("filename"):
+                return Response(content="报告生成失败：context数据为空或无效。请检查任务数据是否完整。", media_type="text/plain")
+            try:
+                if fmt == "md":
+                    content = generator.render_markdown(context)
+                    filename = f"report_{task_id}.md"
+                    media_type = "text/markdown"
+                elif fmt == "html":
+                    content = generator.render_html(context)
+                    filename = f"report_{task_id}.html"
+                    media_type = "text/html"
+                elif fmt == "pdf":
+                    content = generator.render_pdf(context)
+                    filename = f"report_{task_id}.pdf"
+                    media_type = "application/pdf"
+                else:
+                    raise HTTPException(status_code=400, detail="不支持的报告格式")
+            except Exception as e:
+                return Response(content=f"报告渲染异常：{str(e)}", media_type="text/plain")
+            headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+            return Response(content=content, media_type=media_type, headers=headers)
 
-    def _generate_report_markdown(self, task) -> str:
-        """生成检测报告Markdown内容"""
-        lines = []
-        lines.append(f"# 代码缺陷检测报告\n")
-        lines.append(f"**任务ID**: {task.get('id','')}  ")
-        lines.append(f"**代码库路径**: {task.get('repo_path','')}  ")
-        lines.append(f"**首选模型**: {task.get('preferred_model','')}  ")
-        lines.append(f"**创建时间**: {task.get('created_at','')}  ")
-        lines.append(f"**完成时间**: {task.get('completed_at','')}  ")
-        lines.append(f"**状态**: {task.get('status','')}  ")
-        lines.append("\n---\n")
-        # 汇总
+    def _build_report_context(self, task):
+        """将task结构转为报告模板context，自动兼容多种结构"""
         results = task.get('results', {})
-        lines.append(f"## 汇总信息\n")
-        lines.append(f"**总结**: {results.get('summary','无')}  ")
-        lines.append(f"**模型选择**: {results.get('model_selected','无')}  ")
-        lines.append(f"**子任务数**: {len(results.get('subtask_results',{}))}  ")
-        lines.append(f"**所有问题数**: {results.get('defects_found','-')}  ")
-        lines.append("\n---\n")
-        # 各Agent详细结果
-        subtask_results = results.get('subtask_results', {})
-        for agent, agent_result in subtask_results.items():
-            lines.append(f"## {agent} 结果\n")
-            summary = agent_result.get('summary','无')
-            lines.append(f"**总结**: {summary}  ")
-            # 结构化内容
-            for k, v in agent_result.items():
-                if k == 'summary':
-                    continue
-                if isinstance(v, (str, int, float)):
-                    lines.append(f"- **{k}**: {v}")
-                elif isinstance(v, list):
-                    lines.append(f"- **{k}**:")
-                    for item in v:
-                        lines.append(f"    - {item}")
-                elif isinstance(v, dict):
-                    lines.append(f"- **{k}**:")
-                    for subk, subv in v.items():
-                        lines.append(f"    - {subk}: {subv}")
-            # 修复建议/代码块特殊处理
-            if 'fix_suggestion' in agent_result:
-                lines.append(f"\n**修复建议代码：**\n")
-                lines.append(f"```python\n{agent_result['fix_suggestion']}\n```")
-            lines.append("\n---\n")
-        # 错误信息
-        if task.get('error'):
-            lines.append(f"## 错误信息\n{task['error']}\n")
-        # 日志（可选）
-        # lines.append("## 日志\n...\n")
-        return '\n'.join(lines)
+        issues = []
+        # 1. 兼容subtask_results下各种命名
+        for agent, agent_result in (results.get('subtask_results', {}) or {}).items():
+            if isinstance(agent_result, dict):
+                for key in ['issues', 'defects', 'problems']:
+                    if key in agent_result and isinstance(agent_result[key], list):
+                        for issue in agent_result[key]:
+                            issues.append(issue)
+        # 2. 兼容直接有issues/defects/problems的情况
+        for key in ['issues', 'defects', 'problems']:
+            if not issues and key in results and isinstance(results[key], list):
+                issues = results[key]
+        # 3. 兼容单个问题对象
+        if not issues and isinstance(results, dict):
+            for v in results.values():
+                if isinstance(v, list) and v and isinstance(v[0], dict) and 'message' in v[0]:
+                    issues = v
+        # 4. 代码前后对比
+        code_before = results.get('code_before', '')
+        code_after = results.get('code_after', '')
+        # 兼容部分agent直接输出修复建议
+        if not code_after:
+            for agent, agent_result in (results.get('subtask_results', {}) or {}).items():
+                if isinstance(agent_result, dict):
+                    for k in ['fix_suggestion', 'fixed_code', 'code_after']:
+                        if k in agent_result and isinstance(agent_result[k], str) and len(agent_result[k]) > 10:
+                            code_after = agent_result[k]
+        # 统计
+        total_issues = len(issues)
+        fixed_issues = sum(1 for i in issues if i.get('fixed', True))
+        success_rate = int(fixed_issues / total_issues * 100) if total_issues else 100
+        # 构造context
+        context = {
+            "filename": task.get('repo_path', ''),
+            "date": task.get('completed_at', task.get('created_at', '')),
+            "tools": results.get('tools', ['pylint','mypy','bandit']),
+            "model": results.get('model_selected', task.get('preferred_model','')),
+            "total_issues": total_issues,
+            "fixed_issues": fixed_issues,
+            "success_rate": success_rate,
+            "issues": issues,
+            "code_before": code_before,
+            "code_after": code_after
+        }
+        return context
+
+    # _generate_report_markdown 已被ReportGenerator替代
     def __init__(self):
         self.app = FastAPI(
             title="多Agent缺陷检测系统",
@@ -170,6 +188,18 @@ class WebInterface:
         async def dashboard(request: Request):
             return self.templates.TemplateResponse("dashboard.html", {"request": request})
 
+        @self.app.get("/tasks", response_class=HTMLResponse)
+        async def tasks_page(request: Request):
+            return self.templates.TemplateResponse("tasks.html", {"request": request})
+
+        @self.app.get("/models", response_class=HTMLResponse)
+        async def models_page(request: Request):
+            return self.templates.TemplateResponse("models.html", {"request": request})
+
+        @self.app.get("/settings", response_class=HTMLResponse)
+        async def settings_page(request: Request):
+            return self.templates.TemplateResponse("settings.html", {"request": request})
+
         @self.app.get("/tasks/{task_id}", response_class=HTMLResponse)
         async def task_detail_page(request: Request, task_id: str):
             return self.templates.TemplateResponse("task_detail.html", {"request": request})
@@ -192,28 +222,47 @@ class WebInterface:
 
         @self.app.post("/api/tasks/analyze")
         async def create_analysis_task(request: AnalysisTaskRequest = Body(...)):
-            """创建代码分析任务"""
-            repo_path = request.repo_path
-            preferred_model = request.preferred_model
-            task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            
-            if not os.path.exists(repo_path):
-                raise HTTPException(status_code=400, detail="代码库路径不存在")
-            
-            self.tasks[task_id] = {
-                "id": task_id,
-                "repo_path": repo_path,
-                "preferred_model": preferred_model,
-                "status": "pending",
-                "created_at": datetime.now().isoformat(),
-                "progress": 0,
-                "results": None
-            }
-            
-            # 在后台运行任务
-            asyncio.create_task(self._run_analysis_task(task_id))
-            
-            return {"task_id": task_id, "status": "created"}
+            """创建代码分析任务，支持目录或单文件"""
+            try:
+                repo_path = request.repo_path.strip()
+                preferred_model = request.preferred_model
+                task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                
+                # 验证路径
+                if not os.path.exists(repo_path):
+                    raise HTTPException(status_code=400, detail=f"路径不存在: {repo_path}")
+                
+                if not (os.path.isdir(repo_path) or (os.path.isfile(repo_path) and repo_path.endswith('.py'))):
+                    raise HTTPException(status_code=400, detail="只支持目录或Python文件")
+                
+                # 创建任务记录
+                task_data = {
+                    "id": task_id,
+                    "repo_path": repo_path,
+                    "preferred_model": preferred_model,
+                    "status": "running",
+                    "progress": 0,
+                    "current_stage": "初始化...",
+                    "created_at": datetime.now().isoformat(),
+                    "results": {}
+                }
+                self.tasks[task_id] = task_data
+                
+                # 立即推送任务创建成功
+                await self.manager.broadcast(json.dumps({
+                    "type": "task_created",
+                    "task_id": task_id,
+                    "message": "任务已创建，开始分析..."
+                }))
+                
+                # 启动异步任务
+                asyncio.create_task(self._execute_analysis_task(task_id, repo_path, preferred_model))
+                
+                return {"task_id": task_id, "status": "created", "message": "任务已创建"}
+                
+            except Exception as e:
+                logger.error(f"创建任务失败: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"创建任务失败: {str(e)}")
         
         @self.app.get("/api/tasks/{task_id}")
         async def get_task_status(task_id: str):
@@ -241,43 +290,60 @@ class WebInterface:
             except WebSocketDisconnect:
                 self.manager.disconnect(websocket)
 
-    async def _run_analysis_task(self, task_id: str):
-        """在后台运行分析任务"""
-        task = self.tasks[task_id]
-        
+    async def _execute_analysis_task(self, task_id: str, repo_path: str, preferred_model: str):
+        """执行分析任务并推送进度"""
         try:
-            # 更新任务状态
-            task["status"] = "running"
-            await self._update_task_progress(task_id, 10, "开始代码分析...")
+            # 创建进度回调函数
+            async def progress_callback(progress: int, stage: str):
+                await self._update_task_progress(task_id, progress, stage)
             
-            # 运行分析
+            # 更新任务状态
+            await self._update_task_progress(task_id, 5, "正在初始化Agent...")
+            
+            # 执行协调器任务（传递进度回调）
             result = await self.coordinator.execute({
                 "type": "defect_analysis",
-                "description": f"分析代码库 {task['repo_path']} 的缺陷",
-                "repo_path": task["repo_path"],
-                "preferred_model": task["preferred_model"]
+                "description": f"分析代码库 {repo_path} 的缺陷",
+                "repo_path": repo_path,
+                "preferred_model": preferred_model
+            }, progress_callback)
+            
+            # 任务完成
+            self.tasks[task_id].update({
+                "status": "completed",
+                "progress": 100,
+                "current_stage": "分析完成",
+                "completed_at": datetime.now().isoformat(),
+                "results": result
             })
             
-            await self._update_task_progress(task_id, 80, "分析完成，生成报告...")
-            
-            # 保存结果
-            task["results"] = result
-            task["status"] = "completed"
-            task["completed_at"] = datetime.now().isoformat()
-            await self._update_task_progress(task_id, 100, "任务完成")
-            
-            # 广播任务完成
             await self.manager.broadcast(json.dumps({
                 "type": "task_completed",
                 "task_id": task_id,
-                "results": result
+                "progress": 100,
+                "message": "分析完成"
             }))
             
         except Exception as e:
-            logger.error(f"任务 {task_id} 执行失败: {e}")
-            task["status"] = "failed"
-            task["error"] = str(e)
-            await self._update_task_progress(task_id, 0, f"任务失败: {str(e)}")
+            logger.error(f"任务执行失败 {task_id}: {str(e)}")
+            self.tasks[task_id].update({
+                "status": "failed",
+                "progress": 0,
+                "current_stage": "执行失败",
+                "error": str(e)
+            })
+            
+            await self.manager.broadcast(json.dumps({
+                "type": "task_failed",
+                "task_id": task_id,
+                "error": str(e)
+            }))
+    
+    async def _run_analysis_task(self, task_id: str):
+        """向后兼容的方法，重定向到新方法"""
+        task = self.tasks.get(task_id)
+        if task:
+            await self._execute_analysis_task(task_id, task["repo_path"], task["preferred_model"])
 
     async def _update_task_progress(self, task_id: str, progress: int, message: str):
         """更新任务进度"""

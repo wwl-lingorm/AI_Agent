@@ -44,13 +44,74 @@ class Dashboard {
     }
 
     handleWebSocketMessage(data) {
+        console.log('收到WebSocket消息:', data);
         switch (data.type) {
-            case 'progress_update':
-                this.updateProgress(data);
+            case 'task_progress':
+                this.updateTaskProgress(data.task_id, data.progress, data.message);
                 break;
             case 'task_completed':
                 this.handleTaskCompleted(data);
                 break;
+            case 'task_failed':
+                this.handleTaskFailed(data);
+                break;
+        }
+    }
+
+    updateTaskProgress(taskId, progress, message) {
+        console.log(`任务 ${taskId} 进度更新: ${progress}% - ${message}`);
+        
+        // 更新页面上的进度条
+        const taskCards = document.querySelectorAll('.task-item');
+        taskCards.forEach(card => {
+            const title = card.querySelector('.card-title');
+            if (title && title.textContent.includes(taskId)) {
+                const progressBar = card.querySelector('.progress-bar');
+                const progressText = card.querySelector('.text-muted');
+                
+                if (progressBar) {
+                    progressBar.style.width = `${progress}%`;
+                }
+                if (progressText) {
+                    progressText.textContent = `${progress}%`;
+                }
+                
+                // 更新状态信息
+                if (message) {
+                    const statusElement = card.querySelector('.small.text-muted');
+                    if (statusElement) {
+                        statusElement.textContent = message;
+                    }
+                }
+            }
+        });
+        
+        // 如果有详情页面打开，也更新详情页面的进度
+        if (this.currentTaskId === taskId) {
+            this.updateTaskDetailsProgress(taskId, progress, message);
+        }
+    }
+
+    updateTaskDetailsProgress(taskId, progress, message) {
+        // 更新详情页面的进度显示
+        const detailProgress = document.getElementById('taskDetailProgress');
+        const detailProgressText = document.getElementById('taskDetailProgressText');
+        
+        if (detailProgress) {
+            detailProgress.style.width = `${progress}%`;
+        }
+        if (detailProgressText) {
+            detailProgressText.textContent = `${progress}%`;
+        }
+        
+        // 添加进度日志
+        const logContainer = document.getElementById('taskLogs');
+        if (logContainer && message) {
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry small text-muted mb-1';
+            logEntry.innerHTML = `<i class="fas fa-clock"></i> ${new Date().toLocaleTimeString()} - ${message}`;
+            logContainer.appendChild(logEntry);
+            logContainer.scrollTop = logContainer.scrollHeight;
         }
     }
 
