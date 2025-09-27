@@ -62,7 +62,14 @@ class WebInterface:
             # 构造context
             context = self._build_report_context(task)
             if not context or not context.get("filename"):
-                return Response(content="报告生成失败：context数据为空或无效。请检查任务数据是否完整。", media_type="text/plain")
+                # 临时调试：返回原始results和context，便于定位
+                import json
+                debug_info = {
+                    "msg": "报告生成失败：context数据为空或无效。请检查任务数据是否完整。",
+                    "context": context,
+                    "results": task.get('results', {})
+                }
+                return Response(content=json.dumps(debug_info, ensure_ascii=False, indent=2), media_type="application/json")
             try:
                 if fmt == "md":
                     content = generator.render_markdown(context)
@@ -79,7 +86,13 @@ class WebInterface:
                 else:
                     raise HTTPException(status_code=400, detail="不支持的报告格式")
             except Exception as e:
-                return Response(content=f"报告渲染异常：{str(e)}", media_type="text/plain")
+                import json
+                debug_info = {
+                    "msg": f"报告渲染异常：{str(e)}",
+                    "context": context,
+                    "results": task.get('results', {})
+                }
+                return Response(content=json.dumps(debug_info, ensure_ascii=False, indent=2), media_type="application/json")
             headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
             return Response(content=content, media_type=media_type, headers=headers)
 
