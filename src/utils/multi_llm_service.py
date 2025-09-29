@@ -216,39 +216,41 @@ class MultiLLMService:
     async def generate_with_fallback(self, prompt: str, preferred_provider: LLMProvider = None, **kwargs) -> Dict[str, Any]:
         """使用回退策略生成代码"""
         providers_order = self._get_providers_order(preferred_provider)
-        
+        if not providers_order:
+            return {
+                "success": False,
+                "error": "未配置任何模型API key，请在环境变量中设置 DEEPSEEK_API_KEY、OPENAI_API_KEY 或 TONGYI_API_KEY。",
+                "content": "未找到可用模型供应商"
+            }
         for provider in providers_order:
             if provider in self.adapters:
                 try:
                     self.logger.info(f"尝试使用 {provider.value} 生成代码")
                     result = await self.adapters[provider].generate_code(prompt, **kwargs)
-                    
                     # 检查是否是错误消息
                     is_error = (
+                        result is None or
                         result.startswith("DeepSeek错误") or 
                         result.startswith("OpenAI错误") or 
                         result.startswith("通义灵码错误") or
-                        "错误:" in result[:50]  # 前50个字符中包含错误信息
+                        "错误:" in result[:50]
                     )
-                    
                     if not is_error:
                         return {
                             "success": True,
                             "content": result,
                             "provider": provider.value,
-                            "cost_estimate": 0.0  # 简化实现
+                            "cost_estimate": 0.0
                         }
                     else:
                         self.logger.warning(f"{provider.value} 返回错误: {result}")
                         continue
-                    
                 except Exception as e:
                     self.logger.warning(f"{provider.value} 生成失败: {str(e)}")
                     continue
-        
         return {
             "success": False,
-            "error": "所有模型提供商都失败了",
+            "error": "所有模型供应商都失败了，请检查API key配置或网络连接。",
             "content": "无法生成代码修复方案"
         }
     

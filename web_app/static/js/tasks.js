@@ -184,47 +184,50 @@ function filterTasks() {
 }
 
 async function createTask() {
-    const repoPath = document.getElementById('taskRepoPath').value;
+    const taskUpload = document.getElementById('taskUpload');
     const model = document.getElementById('taskModel').value;
-    
-    if (!repoPath) {
-        alert('请输入代码库路径');
+    let path = '';
+    // 优先处理上传
+    if (taskUpload.files && taskUpload.files.length > 0) {
+        const formData = new FormData();
+        for (let i = 0; i < taskUpload.files.length; i++) {
+            formData.append('files', taskUpload.files[i]);
+        }
+        try {
+            const uploadResp = await fetch('/api/langchain/upload', {
+                method: 'POST',
+                body: formData
+            });
+            const uploadData = await uploadResp.json();
+            if (!uploadData.temp_dir) throw new Error('上传失败');
+            path = uploadData.temp_dir;
+        } catch (err) {
+            showToast('error', '上传失败', err.message);
+            return;
+        }
+    }
+    // 只要上传了文件/文件夹就直接分析，无需路径弹窗
+    if (taskUpload.files && taskUpload.files.length > 0) {
+        // 已上传，直接分析
+    } else {
+        // 两者都没有，直接 return，不弹窗
         return;
     }
-    
+    // 调用LangChain流水线API
     try {
-        const response = await fetch('/api/tasks/analyze', {
+        const resp = await fetch('/api/langchain/pipeline', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                repo_path: repoPath,
-                preferred_model: model
-            })
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ repo_path: path, preferred_model: model })
         });
-        
-        const result = await response.json();
-        
-        if (response.ok) {
-            // 关闭模态框
-            const modal = bootstrap.Modal.getInstance(document.getElementById('newTaskModal'));
-            modal.hide();
-            
-            // 清空表单
-            document.getElementById('newTaskForm').reset();
-            
-            // 刷新任务列表
-            loadTasks();
-            
-            // 显示成功消息
-            showToast('success', '任务创建成功', `任务ID: ${result.task_id}`);
-        } else {
-            showToast('error', '创建任务失败', result.detail || '未知错误');
-        }
-    } catch (error) {
-        console.error('创建任务失败:', error);
-        showToast('error', '创建任务失败', error.message);
+        const data = await resp.json();
+        const modal = bootstrap.Modal.getInstance(document.getElementById('newTaskModal'));
+        modal.hide();
+        document.getElementById('newTaskForm').reset();
+        loadTasks();
+        showToast('success', '任务创建成功', '分析已启动');
+    } catch (err) {
+        showToast('error', '任务创建失败', err.message);
     }
 }
 

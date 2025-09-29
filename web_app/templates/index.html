@@ -179,10 +179,13 @@
                                     <div class="row">
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label for="repoPath" class="form-label">代码库路径</label>
-                                                <input type="text" class="form-control" id="repoPath" 
-                                                       placeholder="/path/to/your/project" required>
-                                                <div class="form-text">请输入本地代码库的完整路径</div>
+                                                <label for="repoUpload" class="form-label">上传文件或文件夹</label>
+                                                <input type="file" class="form-control" id="repoUpload" multiple onchange="document.getElementById('repoPath').disabled = this.files.length > 0">
+                                                <div class="form-text">可选择单个.py文件或整个文件夹（可多选）</div>
+                                            </div>
+                                            <div class="mb-3">
+                                                <label for="repoPath" class="form-label">或输入本地路径</label>
+                                                <input type="text" class="form-control" id="repoPath" placeholder="/path/to/your/project">
                                             </div>
                                         </div>
                                         <div class="col-md-4">

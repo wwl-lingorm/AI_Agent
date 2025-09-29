@@ -61,7 +61,6 @@
                 this.loadTaskDetail();
             }
 
-
             async loadTaskDetail() {
                 try {
                     const response = await fetch(`/api/tasks/${this.taskId}`);
@@ -106,7 +105,6 @@
 
             renderTaskDetail(task) {
                 document.getElementById('taskTitle').textContent = `任务详情 - ${task.id}`;
-                
                 const content = `
                     <div class="row mb-4">
                         <div class="col-md-6">
@@ -135,15 +133,50 @@
                             <small class="text-muted">${task.current_step || '等待开始'}</small>
                         </div>
                     </div>
-                    
                     ${task.results ? this.renderResults(task.results) : ''}
                     ${task.error ? this.renderError(task.error) : ''}
                 `;
-                
                 document.getElementById('taskContent').innerHTML = content;
             }
 
             renderResults(results) {
+                if (results && typeof results === 'object' && !results.subtask_results) {
+                    let html = '<h6>LangChain流水线结果</h6>';
+                    for (const [file, res] of Object.entries(results)) {
+                        html += `<div class="card mb-3"><div class="card-header">${file}</div><div class="card-body">`;
+                        if (res.detection && res.detection.all_issues) {
+                            html += `<h6>检测结果</h6>`;
+                            html += `<ul class="list-group mb-3">`;
+                            for (const issue of res.detection.all_issues) {
+                                let color = 'secondary';
+                                if (issue.type && /error|fatal/i.test(issue.type)) color = 'danger';
+                                else if (issue.type && /warning/i.test(issue.type)) color = 'warning';
+                                else if (issue.type && /info|convention|refactor/i.test(issue.type)) color = 'info';
+                                html += `<li class="list-group-item list-group-item-${color}">
+                                    <b>[${issue.type||'未知'}]</b> <span>${issue.message}</span>
+                                    <span class="ms-2 text-muted">${issue.tool||''} 行:${issue.line||''}</span>
+                                </li>`;
+                            }
+                            html += `</ul>`;
+                        }
+                        if (res.repair && res.repair.repair_results && res.repair.repair_results.length) {
+                            html += `<h6>修复建议</h6>`;
+                            for (const r of res.repair.repair_results) {
+                                html += `<div class="alert alert-success">${r.fix_suggestion ? r.fix_suggestion.replace(/\n/g,'<br>') : '无修复建议'}</div>`;
+                            }
+                        }
+                        html += `<h6>修复前后代码对比</h6>`;
+                        html += this.renderDiff(res.repair?.code_before || '', res.repair?.code_after || '');
+                        if (res.validation && res.validation.validation_report) {
+                            html += `<h6>验证结果</h6>`;
+                            for (const v of res.validation.validation_report) {
+                                html += `<div class="alert alert-${v.validation_passed ? 'success' : 'danger'}">${v.summary}</div>`;
+                            }
+                        }
+                        html += '</div></div>';
+                    }
+                    return html;
+                }
                 return `
                     <div class="row">
                         <div class="col-12">
@@ -154,6 +187,29 @@
                         </div>
                     </div>
                 `;
+            }
+
+            renderDiff(before, after) {
+                if (!before && !after) return '<pre class="bg-light">无代码对比</pre>';
+                var beforeLines = before.split('\n');
+                var afterLines = after.split('\n');
+                var html = '<pre style="background:#f8f9fa;padding:10px;border-radius:6px;max-height:400px;overflow:auto">';
+                var maxLen = Math.max(beforeLines.length, afterLines.length);
+                for (var i = 0; i < maxLen; i++) {
+                    var b = beforeLines[i] || '';
+                    var a = afterLines[i] || '';
+                    if (b === a) {
+                        html += `<div style="color:#333">${a}</div>`;
+                    } else if (!b && a) {
+                        html += `<div style="background:#d4edda;color:#155724">+ ${a}</div>`;
+                    } else if (b && !a) {
+                        html += `<div style="background:#f8d7da;color:#721c24">- ${b}</div>`;
+                    } else {
+                        html += `<div style="background:#fff3cd;color:#856404">~ ${a}</div>`;
+                    }
+                }
+                html += '</pre>';
+                return html;
             }
 
             renderSubtaskResults(subtasks) {

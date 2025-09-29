@@ -10,6 +10,20 @@ class AnalysisAgent(BaseAgent):
     async def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
         self.log(f"开始代码分析: {task.get('repo_path')}")
         repo_path = task.get("repo_path")
+        use_langchain = task.get("use_langchain", False)
+        if use_langchain:
+            try:
+                from src.agents.langchain_agent import agent
+                # 这里只分析单文件内容，目录可自行扩展
+                if os.path.isfile(repo_path):
+                    with open(repo_path, 'r', encoding='utf-8') as f:
+                        code = f.read()
+                    result = agent.run({"code": code, "issues": []})
+                    return {"status": "completed", "langchain_result": result, "summary": "LangChain分析完成"}
+                else:
+                    return {"status": "error", "error": "LangChain分析暂仅支持单文件"}
+            except Exception as e:
+                return {"status": "error", "error": f"LangChain分析异常: {str(e)}"}
         if not repo_path or not os.path.exists(repo_path):
             return {"status": "error", "error": "代码库路径或文件无效"}
         # 支持单文件分析

@@ -13,8 +13,8 @@ class Dashboard {
         this.loadTasks();
         this.setupEventListeners();
         
-        // 每30秒刷新一次状态
-        setInterval(() => this.loadSystemStatus(), 30000);
+        // 每10秒刷新一次状态
+        setInterval(() => this.loadSystemStatus(), 10000);
         setInterval(() => this.loadTasks(), 10000);
     }
 
@@ -229,10 +229,76 @@ class Dashboard {
     }
 
     setupEventListeners() {
-        // 分析表单提交
-        document.getElementById('analysisForm').addEventListener('submit', (e) => {
+        // 分析表单提交（彻底优化：只要上传就分析，无需路径弹窗）
+        document.getElementById('analysisForm').addEventListener('submit', async (e) => {
             e.preventDefault();
-            this.startAnalysis();
+            const repoUpload = document.getElementById('repoUpload');
+            const repoPathInput = document.getElementById('repoPath');
+            const repoPath = repoPathInput.value.trim();
+            let path = repoPath;
+            const progressModal = new bootstrap.Modal(document.getElementById('progressModal'));
+            document.getElementById('progressText').textContent = '初始化...';
+            document.getElementById('progressPercent').textContent = '0%';
+            document.getElementById('progressBar').style.width = '0%';
+            document.getElementById('progressDetails').textContent = '';
+            progressModal.show();
+
+
+            // 优先处理上传
+            if (repoUpload.files && repoUpload.files.length > 0) {
+                const formData = new FormData();
+                for (let i = 0; i < repoUpload.files.length; i++) {
+                    formData.append('files', repoUpload.files[i]);
+                }
+                try {
+                    const uploadResp = await fetch('/api/langchain/upload', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const uploadData = await uploadResp.json();
+                    if (!uploadData.temp_dir) throw new Error('上传失败');
+                    path = uploadData.temp_dir;
+                } catch (err) {
+                    document.getElementById('progressText').textContent = '上传失败';
+                    document.getElementById('progressDetails').textContent = err.message;
+                    return;
+                }
+            }
+
+            // 未上传且未填写路径，弹窗提示
+            if (!(repoUpload.files && repoUpload.files.length > 0) && !path) {
+                progressModal.hide();
+                alert('请上传文件或填写代码库路径');
+                return;
+            }
+
+            // 路径输入但不存在，弹窗提示（前端简单校验，后端仍需兜底）
+            if (path && !(repoUpload.files && repoUpload.files.length > 0)) {
+                // 仅在本地环境可用，简单判断路径格式
+                if (!/^([a-zA-Z]:\\|\/|\.\/|\.\\)/.test(path)) {
+                    progressModal.hide();
+                    alert('请输入有效的本地路径，如 C:/project 或 ./src');
+                    return;
+                }
+            }
+
+            // 调用LangChain流水线API
+            try {
+                const resp = await fetch('/api/langchain/pipeline', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ repo_path: path })
+                });
+                const data = await resp.json();
+                document.getElementById('progressText').textContent = '分析完成';
+                document.getElementById('progressPercent').textContent = '100%';
+                document.getElementById('progressBar').style.width = '100%';
+                document.getElementById('progressDetails').textContent = '结果已生成，可在任务详情页查看';
+                setTimeout(() => progressModal.hide(), 2000);
+            } catch (err) {
+                document.getElementById('progressText').textContent = '分析失败';
+                document.getElementById('progressDetails').textContent = err.message;
+            }
         });
 
         // 刷新按钮
@@ -243,47 +309,52 @@ class Dashboard {
     }
 
     async startAnalysis() {
-        const repoPath = document.getElementById('repoPath').value;
+        const repoUpload = document.getElementById('repoUpload');
+        const repoPathInput = document.getElementById('repoPath');
+        const repoPath = repoPathInput.value.trim();
+        let path = repoPath;
         const model = document.getElementById('modelSelect').value;
-
-        if (!repoPath) {
-            alert('请输入代码库路径');
-            return;
-        }
-
         const analyzeBtn = document.getElementById('analyzeBtn');
         analyzeBtn.disabled = true;
         analyzeBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>分析中...';
-
-        try {
-            const response = await fetch('/api/tasks/analyze', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    repo_path: repoPath,
-                    preferred_model: model
-                })
-            });
-
-            const result = await response.json();
-            
-            if (response.ok) {
-                this.currentTaskId = result.task_id;
-                this.showProgressModal();
-                this.loadTasks(); // 刷新任务列表
-            } else {
-                console.log('创建任务失败返回内容:', result);
-                alert('创建任务失败: ' + JSON.stringify(result));
+        // 优先处理上传
+        if (repoUpload.files && repoUpload.files.length > 0) {
+            const formData = new FormData();
+            for (let i = 0; i < repoUpload.files.length; i++) {
+                formData.append('files', repoUpload.files[i]);
             }
-        } catch (error) {
-            console.error('分析请求失败:', error);
-            alert('分析请求失败: ' + error.message);
-        } finally {
-            analyzeBtn.disabled = false;
-            analyzeBtn.innerHTML = '<i class="fas fa-play me-2"></i>开始分析';
+            try {
+                const uploadResp = await fetch('/api/langchain/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const uploadData = await uploadResp.json();
+                if (!uploadData.temp_dir) throw new Error('上传失败');
+                path = uploadData.temp_dir;
+            } catch (err) {
+                alert('上传失败: ' + err.message);
+                analyzeBtn.disabled = false;
+                analyzeBtn.innerHTML = '<i class="fas fa-play me-2"></i>开始分析';
+                return;
+            }
         }
+        // 只要上传了文件/文件夹，path为空也允许分析
+        if (!path && repoUpload.files && repoUpload.files.length > 0) {
+            path = undefined; // 传给后端的repo_path为undefined或空字符串，后端用上传目录
+        }
+        try {
+            const resp = await fetch('/api/langchain/pipeline', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ repo_path: path, preferred_model: model })
+            });
+            const data = await resp.json();
+            alert('分析完成！结果已生成，可在任务详情页查看');
+        } catch (error) {
+            alert('分析请求失败: ' + error.message);
+        }
+        analyzeBtn.disabled = false;
+        analyzeBtn.innerHTML = '<i class="fas fa-play me-2"></i>开始分析';
     }
 
     showProgressModal() {

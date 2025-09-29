@@ -8,7 +8,10 @@ class RepairAgent(BaseAgent):
         self.llm_service = multi_llm_service
     
     async def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        self.log("开始代码修复")
+        self.log("开始批量文件修复")
+        use_langchain = task.get("use_langchain", False)
+        code_context_map = task.get("code_context_map")
+        all_issues = task.get("all_issues")
         preferred_model = task.get("preferred_model", "deepseek")
         provider_map = {
             "deepseek": LLMProvider.DEEPSEEK,
@@ -17,75 +20,78 @@ class RepairAgent(BaseAgent):
         }
         preferred_provider = provider_map.get(preferred_model, LLMProvider.DEEPSEEK)
 
-        all_issues = task.get("all_issues")
-        code_context_map = task.get("code_context_map")
+        if code_context_map is None or not isinstance(code_context_map, dict):
+            return {"status": "error", "error": "缺少 code_context_map 或格式错误", "repair_results": []}
 
-        self.log(f"收到修复任务 - all_issues数量: {len(all_issues) if all_issues else 0}")
-        self.log(f"收到修复任务 - code_context_map keys: {list(code_context_map.keys()) if code_context_map else []}")
+        # 兼容单文件 all_issues 结构
+        if all_issues is None:
+            all_issues = {}
+        # all_issues: {file_path: [issue, ...], ...} 或 [issue, ...]
+        if isinstance(all_issues, list):
+            # 单文件场景，转为 dict
+            if len(code_context_map) == 1:
+                file_path = list(code_context_map.keys())[0]
+                all_issues = {file_path: all_issues}
+            else:
+                return {"status": "error", "error": "all_issues为list但有多个文件，无法对应", "repair_results": []}
 
-        if all_issues is None or code_context_map is None:
-            return {
-                "status": "error",
-                "error": "缺少问题列表或代码上下文",
-                "repair_results": []
-            }
+        import asyncio, os
+        async def repair_one_file(file_path, code, issues):
+            issues_text = "\n".join([self._format_issue(issue) for issue in issues])
+            prompt = f"请修复以下Python代码中的所有问题，并给出修复后的完整代码：\n\n问题列表：\n{issues_text}\n\n原始代码：\n{code}"
+            self.log(f"修复文件: {file_path}, 问题数: {len(issues)}, prompt长度: {len(prompt)} 字符")
+            try:
+                llm_result = await self.llm_service.generate_with_fallback(
+                    prompt,
+                    preferred_provider=preferred_provider,
+                    max_tokens=2048,
+                    temperature=0.3
+                )
+                if llm_result["success"]:
+                    return {
+                        "status": "completed",
+                        "file": file_path,
+                        "fix_suggestion": llm_result["content"],
+                        "model_used": llm_result["provider"],
+                        "issues": issues,
+                        "code_before": code,
+                        "code_after": llm_result["content"]
+                    }
+                else:
+                    return {
+                        "status": "error",
+                        "file": file_path,
+                        "error": llm_result["error"],
+                        "issues": issues,
+                        "code_before": code
+                    }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "file": file_path,
+                    "error": f"LLM修复异常: {str(e)}",
+                    "issues": issues,
+                    "code_before": code
+                }
 
-        if not all_issues:
-            return {
-                "status": "completed",
-                "repair_results": [],
-                "summary": "未发现需要修复的问题"
-            }
+        # 并发修复所有文件
+        tasks = []
+        for file_path, code in code_context_map.items():
+            issues = all_issues.get(file_path, [])
+            if not isinstance(issues, list):
+                issues = []
+            tasks.append(repair_one_file(file_path, code, issues))
 
-        import os
-        file_path = all_issues[0].get("file")
-        code_context = code_context_map.get(file_path)
-        if not code_context:
-            for k in code_context_map:
-                if os.path.basename(k) == os.path.basename(file_path):
-                    code_context = code_context_map[k]
-                    break
-        if not code_context:
-            return {
-                "status": "error",
-                "error": f"未找到{file_path}的代码上下文",
-                "repair_results": []
-            }
+        repair_results = await asyncio.gather(*tasks)
 
-        issues_text = "\n".join([self._format_issue(issue) for issue in all_issues])
-        prompt = f"请修复以下Python代码中的所有问题，并给出修复后的完整代码：\n\n问题列表：\n{issues_text}\n\n原始代码：\n{code_context}"
-        self.log(f"批量修复模式，问题数: {len(all_issues)}, prompt长度: {len(prompt)} 字符")
-        try:
-            llm_result = await self.llm_service.generate_with_fallback(
-                prompt,
-                preferred_provider=preferred_provider,
-                max_tokens=2048,
-                temperature=0.3
-            )
-            self.log(f"LLM批量修复结果: success={llm_result.get('success')}, error={llm_result.get('error')}, content预览={str(llm_result.get('content'))[:200]}")
-        except Exception as e:
-            self.log(f"LLM批量修复异常: {str(e)}")
-            llm_result = {"success": False, "error": f"LLM批量修复异常: {str(e)}"}
-
-        if llm_result["success"]:
-            return {
-                "status": "completed",
-                "repair_results": [{
-                    "status": "completed",
-                    "fix_suggestion": llm_result["content"],
-                    "model_used": llm_result["provider"],
-                    "issues": all_issues
-                }],
-                "summary": f"批量修复成功，修复问题数: {len(all_issues)}",
-                "code_before": code_context,
-                "code_after": llm_result["content"]
-            }
-        else:
-            return {
-                "status": "error",
-                "error": llm_result["error"],
-                "repair_results": []
-            }
+        # 汇总所有修复结果
+        success_count = sum(1 for r in repair_results if r.get("status") == "completed")
+        summary = f"批量修复完成，成功: {success_count}，总文件: {len(repair_results)}"
+        return {
+            "status": "completed" if success_count == len(repair_results) else "partial",
+            "repair_results": repair_results,
+            "summary": summary
+        }
 
     def _format_issue(self, issue: dict) -> str:
         """将结构化issue转为自然语言描述"""

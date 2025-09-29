@@ -12,6 +12,27 @@ class ValidationAgent(BaseAgent):
     
     async def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
         self.log("开始验证修复结果")
+        use_langchain = task.get("use_langchain", False)
+        if use_langchain:
+            try:
+                from src.agents.langchain_agent import agent
+                code_context_map = task.get("code_context_map")
+                # 默认取第一个文件
+                if code_context_map:
+                    file_path = list(code_context_map.keys())[0]
+                    code = code_context_map[file_path]
+                    result = agent.run({"code": code, "issues": []})
+                    return {
+                        "status": "completed",
+                        "langchain_result": result,
+                        "summary": "LangChain测试/验证完成",
+                        "code_tested": code,
+                        "test_result": result
+                    }
+                else:
+                    return {"status": "error", "error": "LangChain测试需提供code_context_map"}
+            except Exception as e:
+                return {"status": "error", "error": f"LangChain测试异常: {str(e)}"}
         repo_path = task.get("repo_path")
         # 批量验证模式：支持传入修复结果列表
         repair_results = task.get("repair_results")
