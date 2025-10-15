@@ -25,6 +25,9 @@
                         <h5 id="taskTitle">任务详情</h5>
                         <div>
                             <div id="downloadBtns" style="display:none;" class="btn-group me-2">
+                                <button class="btn btn-outline-success btn-sm" onclick="TaskDetail.downloadFixedZip()">
+                                    <i class="fas fa-file-archive me-1"></i>下载修复代码 (ZIP)
+                                </button>
                                 <button class="btn btn-success btn-sm" onclick="TaskDetail.downloadReport('md')">
                                     <i class="fas fa-file-alt me-1"></i>Markdown
                                 </button>
@@ -59,6 +62,17 @@
             constructor() {
                 this.taskId = window.location.pathname.split('/').pop();
                 this.loadTaskDetail();
+            }
+
+            static downloadFixedCode(filename, code) {
+                const blob = new Blob([decodeURIComponent(code)], {type: 'text/x-python'});
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = filename.endsWith('.py') ? filename : (filename + '.py');
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(a.href);
             }
 
             async loadTaskDetail() {
@@ -103,6 +117,49 @@
                 }
             }
 
+            static async downloadFixedZip() {
+                try {
+                    const taskId = window.location.pathname.split('/').pop();
+                    const resp = await fetch(`/api/tasks/${taskId}/download-fixed`);
+                    if (!resp.ok) {
+                        const txt = await resp.text();
+                        throw new Error(txt || '下载失败');
+                    }
+                    const blob = await resp.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `fixed_files_${taskId}.zip`;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    window.URL.revokeObjectURL(url);
+                } catch (e) {
+                    alert('下载修复代码失败: ' + e.message);
+                }
+            }
+
+            static async downloadFixedFile(taskId, filename) {
+                try {
+                    const resp = await fetch(`/api/tasks/${taskId}/download-fixed?file=${encodeURIComponent(filename)}`);
+                    if (!resp.ok) {
+                        const txt = await resp.text();
+                        throw new Error(txt || '下载文件失败');
+                    }
+                    const blob = await resp.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    window.URL.revokeObjectURL(url);
+                } catch (e) {
+                    alert('下载文件失败: ' + e.message);
+                }
+            }
+
             renderTaskDetail(task) {
                 document.getElementById('taskTitle').textContent = `任务详情 - ${task.id}`;
                 const content = `
@@ -144,7 +201,7 @@
                     let html = '<h6>LangChain流水线结果</h6>';
                     for (const [file, res] of Object.entries(results)) {
                         html += `<div class="card mb-3"><div class="card-header">${file}</div><div class="card-body">`;
-                        if (res.detection && res.detection.all_issues) {
+                                        if (res.detection && res.detection.all_issues) {
                             html += `<h6>检测结果</h6>`;
                             html += `<ul class="list-group mb-3">`;
                             for (const issue of res.detection.all_issues) {
@@ -159,18 +216,64 @@
                             }
                             html += `</ul>`;
                         }
-                        if (res.repair && res.repair.repair_results && res.repair.repair_results.length) {
-                            html += `<h6>修复建议</h6>`;
-                            for (const r of res.repair.repair_results) {
-                                html += `<div class="alert alert-success">${r.fix_suggestion ? r.fix_suggestion.replace(/\n/g,'<br>') : '无修复建议'}</div>`;
+                        // 静态/动态修复结果分组（兼容单文件 repair_results 为数组的情况）
+                        if (res.repair && Array.isArray(res.repair.repair_results)) {
+                            let staticHtml = '', dynamicHtml = '';
+                            if (res.repair.repair_results.length === 0) {
+                                // 没有修复结果，显示原始代码
+                                staticHtml += `<h6>原始代码片段</h6><pre class="bg-light p-2 rounded">${res.repair.code_before ? res.repair.code_before.replace(/</g,'&lt;').replace(/>/g,'&gt;') : '无代码'}</pre>`;
+                            } else {
+                                for (const r of res.repair.repair_results) {
+                                    if (r.result_type === 'static') {
+                                        let isFail = r.fix_suggestion && r.fix_suggestion.startsWith('# 修复失败');
+                                        staticHtml += `<div class="alert alert-${isFail ? 'danger' : 'success'} mb-2">静态修复建议：<br>${r.fix_suggestion ? r.fix_suggestion.replace(/\n/g,'<br>') : '无修复建议'}`;
+                                        if (isFail) {
+                                            staticHtml += `<br><b>LLM修复失败详情：</b> <span class="text-danger">${r.fix_suggestion.replace(/# 修复失败:/,'')}</span>`;
+                                        }
+                                        if (!isFail && r.code_after) {
+                                            staticHtml += `<br><button class="btn btn-outline-primary btn-sm mt-2" onclick="TaskDetail.downloadFixedCode('${file}','${encodeURIComponent(r.code_after)}')"><i class='fas fa-download'></i> 下载修复后代码</button>`;
+                                        }
+                                        staticHtml += `</div>`;
+                                        staticHtml += `<h6>静态修复前后代码对比</h6>`;
+                                        staticHtml += r.diff_html ? `<div class="border rounded mb-2" style="background:#f8f9fa;padding:10px;">${r.diff_html}</div>` : this.renderDiff(r.code_before||'', r.code_after||'');
+                                    } else if (r.result_type === 'dynamic') {
+                                        dynamicHtml += `<div class="alert alert-warning mb-2">动态错误检测：<br>`;
+                                        if (r.runtime_error) dynamicHtml += `<b>运行时错误：</b><pre style="color:#cb2431;background:#ffeef0">${r.runtime_error}</pre>`;
+                                        if (r.perf_info) dynamicHtml += `<b>性能分析：</b><pre style="color:#22863a;background:#e6ffed">${r.perf_info}</pre>`;
+                                        if (r.resource_leak) dynamicHtml += `<b>资源泄漏：</b><pre style="color:#856404;background:#fff3cd">${r.resource_leak}</pre>`;
+                                        if (r.env_missing) dynamicHtml += `<b>环境变量缺失：</b><pre style="color:#856404;background:#fff3cd">${r.env_missing}</pre>`;
+                                        dynamicHtml += `<b>修复建议：</b><br>${r.fix_suggestion ? r.fix_suggestion.replace(/\n/g,'<br>') : '无修复建议'}`;
+                                        dynamicHtml += `<h6>动态修复前后代码对比</h6>`;
+                                        dynamicHtml += r.diff_html ? `<div class="border rounded mb-2" style="background:#f8f9fa;padding:10px;">${r.diff_html}</div>` : this.renderDiff(r.code_before||'', r.code_after||'');
+                                        dynamicHtml += `</div>`;
+                                    }
+                                }
                             }
+                            if (staticHtml) html += `<h6>静态修复结果</h6>` + staticHtml;
+                            if (dynamicHtml) html += `<h6>动态错误检测与修复</h6>` + dynamicHtml;
                         }
-                        html += `<h6>修复前后代码对比</h6>`;
-                        html += this.renderDiff(res.repair?.code_before || '', res.repair?.code_after || '');
                         if (res.validation && res.validation.validation_report) {
                             html += `<h6>验证结果</h6>`;
                             for (const v of res.validation.validation_report) {
                                 html += `<div class="alert alert-${v.validation_passed ? 'success' : 'danger'}">${v.summary}</div>`;
+                                if (v.detailed_results) {
+                                    html += `<div class="mb-2">`;
+                                    for (const [key, detail] of Object.entries(v.detailed_results)) {
+                                        let passColor = detail.passed ? 'success' : 'danger';
+                                        let labelMap = {
+                                            'syntax_check':'语法检查',
+                                            'test_execution':'自动化测试',
+                                            'regression_check':'回归检查',
+                                            'code_quality':'代码质量'
+                                        };
+                                        html += `<div class=\"alert alert-${passColor} p-2 mb-1\"><b>${labelMap[key]||key}：</b> ${detail.message ? detail.message : ''}`;
+                                        if (detail.stdout) html += `<details><summary>测试输出</summary><pre>${detail.stdout}</pre></details>`;
+                                        if (detail.stderr) html += `<details><summary>错误输出</summary><pre>${detail.stderr}</pre></details>`;
+                                        if (detail.quality_score !== undefined) html += `<br>质量评分: ${detail.quality_score}`;
+                                        html += `</div>`;
+                                    }
+                                    html += `</div>`;
+                                }
                             }
                         }
                         html += '</div></div>';

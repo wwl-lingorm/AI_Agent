@@ -1,6 +1,6 @@
 from langchain.tools import Tool
 from langchain.agents import initialize_agent
-from langchain.llms import OpenAI
+from langchain_community.llms import OpenAI
 
 from .analysis_agent import AnalysisAgent
 from .repair_agent import RepairAgent
@@ -85,55 +85,93 @@ import asyncio
 import os
 async def pipeline_run(repo_path):
     # 递归收集所有py文件
-    file_list = []
-    if os.path.isfile(repo_path) and repo_path.endswith('.py'):
-        file_list = [repo_path]
-    elif os.path.isdir(repo_path):
-        for root, dirs, files in os.walk(repo_path):
+    def build_tree(root_path):
+        tree = {}
+        code_exts = ['.py', '.ipynb', '.js', '.ts', '.java', '.cpp', '.c', '.go', '.rs', '.rb', '.php', '.cs']
+        skip_dirs = {'.venv', 'venv', '__pycache__', 'node_modules', '.git', '.idea', '.vscode', 'dist', 'build', 'output', 'env', '.mypy_cache', '.pytest_cache'}
+        for dirpath, dirs, files in os.walk(root_path):
+            # 跳过无关/虚拟环境/缓存/第三方依赖目录
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            rel_dir = os.path.relpath(dirpath, root_path)
+            if rel_dir == '.':
+                rel_dir = ''
             for file in files:
-                if file.endswith('.py'):
-                    file_list.append(os.path.join(root, file))
+                if any(file.endswith(ext) for ext in code_exts):
+                    rel_file = os.path.join(rel_dir, file) if rel_dir else file
+                    tree[rel_file] = os.path.join(dirpath, file)
+        return tree
+
+    if os.path.isfile(repo_path) and repo_path.endswith('.py'):
+        file_tree = {os.path.basename(repo_path): repo_path}
+    elif os.path.isdir(repo_path):
+        file_tree = build_tree(repo_path)
     else:
         return {"error": "路径无效或不支持的文件类型"}
 
+    import asyncio
     results = {}
-    for file_path in file_list:
-        # 缺陷检测
-        detection_result = await detection_tool({"repo_path": file_path})
-        issues = detection_result.get("all_issues", [])
-        code_context_map = {}
-        # 结构分析（可选，补充结构信息）
-        analysis_result = await analysis_tool({"repo_path": file_path})
-        if analysis_result.get("structure") and analysis_result["structure"].get("files"):
-            code_context_map = {f["path"]: f["content"] for f in analysis_result["structure"]["files"]}
-        # 修复
-        repair_result = await repair_tool({"all_issues": issues, "code_context_map": code_context_map})
-        # 组织修复结果列表，补充 original_issue、file_path、fixed_code 字段，供验证用
-        repair_results = []
-        for idx, r in enumerate(repair_result.get("repair_results", [])):
-            # 兼容 fix_suggestion 为修复后代码
-            code_after = r.get("fix_suggestion")
-            # 取第一个 issue 作为原始问题
-            issue = issues[idx] if idx < len(issues) else (r.get("issues")[0] if r.get("issues") else {})
-            repair_results.append({
-                "original_issue": issue,
-                "file": issue.get("file") if issue else file_path,
-                "fixed_code": code_after,
-                "fix_suggestion": code_after,
-                **r
+    # 控制最大并发数，提升分析速度（如遇内存/配额问题可调低）
+    SEMAPHORE_LIMIT = 8
+    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
+
+    async def process_file(rel_path, abs_path):
+        async with semaphore:
+            # 静态检测
+            detection_result = await detection_tool({"repo_path": abs_path})
+            # 保留检测原始结果用于展示
+            issues = detection_result.get("all_issues", [])
+            # 过滤低优先级问题（如 convention/info），只保留 error/warning/runtime
+            def filter_issues(issues_list):
+                high = []
+                for it in issues_list:
+                    t = ''
+                    if isinstance(it.get('type'), str):
+                        t = it.get('type')
+                    elif isinstance(it.get('severity'), str):
+                        t = it.get('severity')
+                    else:
+                        t = str(it)
+                    tl = t.lower()
+                    if 'error' in tl or 'warn' in tl or 'runtime' in tl or 'critical' in tl or 'fatal' in tl:
+                        high.append(it)
+                return high
+            high_issues = filter_issues(issues)
+            code_context_map = {}
+            # 结构分析
+            analysis_result = await analysis_tool({"repo_path": abs_path})
+            if analysis_result.get("structure") and analysis_result["structure"].get("files"):
+                code_context_map = {f["path"]: f["content"] for f in analysis_result["structure"]["files"]}
+            # 修复（静态+动态） — 仅对高优先级问题执行修复
+            repair_result = await repair_tool({"all_issues": high_issues, "code_context_map": code_context_map})
+            repair_results = []
+            for idx, r in enumerate(repair_result.get("repair_results", [])):
+                code_after = r.get("fix_suggestion")
+                issue = high_issues[idx] if idx < len(high_issues) else (r.get("issues")[0] if r.get("issues") else {})
+                repair_results.append({
+                    "original_issue": issue,
+                    "file": issue.get("file") if issue else rel_path,
+                    "fixed_code": code_after,
+                    "fix_suggestion": code_after,
+                    **r
+                })
+            # 验证
+            validation_result = await validation_tool({
+                "repo_path": repo_path,
+                "repair_results": repair_results,
+                "code_context_map": code_context_map
             })
-        # 验证（传递修复结果、代码上下文、repo_path）
-        validation_result = await validation_tool({
-            "repo_path": repo_path,
-            "repair_results": repair_results,
-            "code_context_map": code_context_map
-        })
-        results[file_path] = {
-            "detection": detection_result,
-            "analysis": analysis_result,
-            "repair": repair_result,
-            "validation": validation_result
-        }
+            return rel_path, {
+                "detection": detection_result,
+                "analysis": analysis_result,
+                "repair": repair_result,
+                "validation": validation_result
+            }
+
+    # 分批处理所有文件
+    tasks = [process_file(rel_path, abs_path) for rel_path, abs_path in file_tree.items()]
+    for fut in asyncio.as_completed(tasks):
+        rel_path, result = await fut
+        results[rel_path] = result
     return results
 
 if __name__ == "__main__":

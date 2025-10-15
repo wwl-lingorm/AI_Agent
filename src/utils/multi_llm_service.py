@@ -39,42 +39,43 @@ class DeepSeekAdapter(BaseLLMAdapter):
     """DeepSeek适配器"""
     
     async def generate_code(self, prompt: str, **kwargs) -> str:
-        try:
-            # 简化实现，实际使用时安装 deepseek-api 包
-            import requests
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            data = {
-                "model": "deepseek-coder",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": kwargs.get("max_tokens", 2048),
-                "temperature": kwargs.get("temperature", 0.7)
-            }
-            
-            response = requests.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                headers=headers,
-                json=data,
-                timeout=60
-            )
-            response.raise_for_status()
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
-        except Exception as e:
-            # 打印原始响应内容
-            import sys
-            exc_type, exc_value, exc_tb = sys.exc_info()
-            response_text = None
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    response_text = e.response.text
-                    print("DeepSeek原始响应：", response_text)
-                except Exception:
-                    pass
-            self.logger.error(f"DeepSeek API调用失败: {str(e)}; 原始响应: {response_text}")
-            return f"DeepSeek错误: {str(e)}; 原始响应: {response_text}"
+        import requests
+        import time
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": "deepseek-coder",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": kwargs.get("max_tokens", 2048),
+            "temperature": kwargs.get("temperature", 0.7)
+        }
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    "https://api.deepseek.com/v1/chat/completions",
+                    headers=headers,
+                    json=data,
+                    timeout=90
+                )
+                response.raise_for_status()
+                result = response.json()
+                return result["choices"][0]["message"]["content"]
+            except Exception as e:
+                response_text = None
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        response_text = e.response.text
+                    except Exception:
+                        pass
+                self.logger.warning(f"DeepSeek API调用失败: {str(e)}; 原始响应: {response_text}; 尝试次数: {attempt+1}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 * (attempt + 1))  # 指数退避
+                else:
+                    self.logger.error(f"DeepSeek最终失败: {str(e)}; 原始响应: {response_text}")
+                    return f"DeepSeek错误: {str(e)}; 原始响应: {response_text}"
     
     async def chat_complete(self, messages: List[Dict], **kwargs) -> str:
         # 与generate_code类似，可以根据需要调整

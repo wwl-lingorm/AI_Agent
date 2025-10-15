@@ -3,7 +3,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.requests import Request
 import uvicorn
 import asyncio
@@ -25,10 +25,48 @@ from src.utils.model_selector import ModelSelector
 # 新增：LangChain文件上传接口
 from fastapi import UploadFile, File
 import tempfile, shutil
+import io, zipfile
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("WebInterface")
+
+class ConnectionManager:
+    """管理WebSocket连接"""
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.requests import Request
+import uvicorn
+import asyncio
+import json
+import os
+from datetime import datetime
+from typing import Dict, List, Optional
+import logging
+from .report_generator import ReportGenerator
+from pydantic import BaseModel
+from fastapi import Body
+from src.agents.coordinator_agent import CoordinatorAgent
+from src.agents.analysis_agent import AnalysisAgent
+from src.agents.detection_agent import DetectionAgent
+from src.agents.repair_agent import RepairAgent
+from src.agents.validation_agent import ValidationAgent
+from src.utils.multi_llm_service import MultiLLMService
+from src.utils.model_selector import ModelSelector
+import tempfile, shutil, io, zipfile
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("WebInterface")
+
 
 class ConnectionManager:
     """管理WebSocket连接"""
@@ -52,10 +90,12 @@ class ConnectionManager:
             except Exception as e:
                 logger.error(f"广播消息失败: {e}")
 
+
 class WebInterface:
 
     def add_report_route(self):
         generator = ReportGenerator()
+
         @self.app.get("/api/tasks/{task_id}/report")
         async def download_report(task_id: str, fmt: str = "md"):
             """生成并下载检测报告，支持md/html/pdf"""
@@ -203,37 +243,37 @@ class WebInterface:
         try:
             from dotenv import load_dotenv
             load_dotenv()
-            
+
             self.llm_service = MultiLLMService()
             self.model_selector = ModelSelector()
-            
+
             # 初始化Agent
             self.coordinator = CoordinatorAgent(self.model_selector)
             self.analysis_agent = AnalysisAgent()
             self.detection_agent = DetectionAgent()
             self.repair_agent = RepairAgent(self.llm_service)
             self.validation_agent = ValidationAgent()
-            
+
             # 注册Agent
             self.coordinator.register_agent("AnalysisAgent", self.analysis_agent)
             self.coordinator.register_agent("DetectionAgent", self.detection_agent)
             self.coordinator.register_agent("RepairAgent", self.repair_agent)
             self.coordinator.register_agent("ValidationAgent", self.validation_agent)
-            
+
             logger.info("多Agent系统初始化完成")
         except Exception as e:
             logger.error(f"系统初始化失败: {e}")
 
     def _setup_routes(self):
         """设置路由"""
-        
+
         # 挂载静态文件
         self.app.mount("/static", StaticFiles(directory="web_app/static"), name="static")
-        
+
         @self.app.get("/", response_class=HTMLResponse)
         async def read_root(request: Request):
             return self.templates.TemplateResponse("index.html", {"request": request})
-        
+
         @self.app.get("/dashboard")
         async def dashboard(request: Request):
             return self.templates.TemplateResponse("dashboard.html", {"request": request})
@@ -253,7 +293,7 @@ class WebInterface:
         @self.app.get("/tasks/{task_id}", response_class=HTMLResponse)
         async def task_detail_page(request: Request, task_id: str):
             return self.templates.TemplateResponse("task_detail.html", {"request": request})
-        
+
         @self.app.get("/api/system/status")
         async def get_system_status():
             """获取系统状态"""
@@ -409,6 +449,63 @@ class WebInterface:
             except WebSocketDisconnect:
                 self.manager.disconnect(websocket)
 
+        @self.app.get("/api/tasks/{task_id}/download-fixed")
+        async def download_fixed(task_id: str, file: str = None):
+            """Download fixed code for a task. If `file` is provided, return a single file. Otherwise return a zip of all fixed files."""
+            if task_id not in self.tasks:
+                raise HTTPException(status_code=404, detail="task not found")
+            task = self.tasks[task_id]
+            results = task.get('results', {})
+
+            # collect all fixed code entries from repair results
+            files = []  # list of (filename, content)
+            # results schema: results[file].repair.repair_results -> array
+            for key, res in (results or {}).items():
+                try:
+                    if isinstance(res, dict) and res.get('repair') and isinstance(res['repair'].get('repair_results'), list):
+                        for r in res['repair']['repair_results']:
+                            if r.get('result_type') == 'static' and r.get('code_after'):
+                                fname = key if key.endswith('.py') else (key + '.py')
+                                # if multiple fixes for same file, append suffix
+                                if any(f[0] == fname for f in files):
+                                    i = 1
+                                    base = fname.rsplit('.py',1)[0]
+                                    while any(f[0] == f"{base}_fix{i}.py" for f in files):
+                                        i += 1
+                                    fname = f"{base}_fix{i}.py"
+                                files.append((fname, r['code_after']))
+                except Exception:
+                    continue
+
+            # fallback: top-level repair.code_after or code_after in single repair result
+            if not files and isinstance(results.get('repair'), dict):
+                rr = results['repair']
+                if rr.get('code_after'):
+                    files.append((task.get('repo_path','fixed.py').split('/')[-1] or 'fixed.py', rr['code_after']))
+
+            if not files:
+                raise HTTPException(status_code=404, detail='no fixed files available')
+
+            if file:
+                # return single file if exists
+                for fname, content in files:
+                    if fname == file or fname == (file + '.py'):
+                        return Response(content=content, media_type='text/x-python', headers={'Content-Disposition': f'attachment; filename="{fname}"'})
+                raise HTTPException(status_code=404, detail='file not found')
+
+            # otherwise package into zip and return stream
+            mem = io.BytesIO()
+            with zipfile.ZipFile(mem, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+                for fname, content in files:
+                    # ensure bytes
+                    if isinstance(content, str):
+                        data = content.encode('utf-8')
+                    else:
+                        data = content
+                    zf.writestr(fname, data)
+            mem.seek(0)
+            return StreamingResponse(mem, media_type='application/zip', headers={'Content-Disposition': f'attachment; filename="fixed_files_{task_id}.zip"'})
+
     async def _execute_analysis_task(self, task_id: str, repo_path: str, preferred_model: str):
         """执行分析任务并推送进度"""
         try:
@@ -488,4 +585,3 @@ app = web_interface.app
 
 if __name__ == "__main__":
     web_interface.run()
-# [file content end]

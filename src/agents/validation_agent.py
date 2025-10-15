@@ -119,11 +119,11 @@ class ValidationAgent(BaseAgent):
             
             # 尝试运行相关测试
             test_result = subprocess.run(
-                ['python', '-m', 'pytest', '--tb=short', '-v'],
+                ['python', '-m', 'pytest', '--tb=long', '-v'],
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
-                timeout=30  # 30秒超时
+                timeout=120  # 延长超时以便完整运行测试
             )
             
             os.unlink(temp_file_path)  # 清理临时文件
@@ -133,7 +133,8 @@ class ValidationAgent(BaseAgent):
                 "returncode": test_result.returncode,
                 "stdout": test_result.stdout,
                 "stderr": test_result.stderr,
-                "message": "测试执行完成"
+                "message": "测试执行完成",
+                "traceback": test_result.stderr
             }
             
         except subprocess.TimeoutExpired:
